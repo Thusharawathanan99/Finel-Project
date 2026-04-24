@@ -262,7 +262,7 @@ const initializeDemoData = (dashboard: Dashboard): void => {
 
 export default function App() {
   const [dashboard] = useState<Dashboard>(() => new Dashboard());
-  const [currentScreen, setCurrentScreen] = useState<'welcome' | 'auth' | 'app' | 'loading'>('welcome');
+  const [currentScreen, setCurrentScreen] = useState<'welcome' | 'auth' | 'app' | 'loading'>('loading');
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -329,6 +329,10 @@ export default function App() {
           setCurrentScreen('app');
         } catch (err) {
           console.error('[App] Auth state error:', err);
+          setCurrentScreen('auth');
+        }
+      } else {
+        if (currentScreenRef.current === 'loading') {
           setCurrentScreen('auth');
         }
       }
@@ -443,7 +447,6 @@ export default function App() {
       }
       return (
         <PatientDashboard
-          key={refreshKey}
           user={currentUser}
           resident={resident}
           dashboard={dashboard}
@@ -456,7 +459,6 @@ export default function App() {
     if (currentUser.role === 'caretaker') {
       return (
         <CaretakerDashboard
-          key={refreshKey}
           user={currentUser}
           dashboard={dashboard}
           onLogout={handleLogout}
@@ -468,7 +470,6 @@ export default function App() {
     if (currentUser.role === 'admin') {
       return (
         <AdminDashboard
-          key={refreshKey}
           user={currentUser}
           dashboard={dashboard}
           onLogout={handleLogout}

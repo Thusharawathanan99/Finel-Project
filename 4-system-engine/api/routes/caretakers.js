@@ -152,6 +152,54 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// DELETE /api/caretakers/:id — Remove caretaker and related records
+router.delete('/:id', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    if (!(await isAdminRequest(req))) {
+      connection.release();
+      return res.status(403).json({ error: 'Only admin can remove caretakers' });
+    }
+
+    const caretakerId = req.params.id;
+    const [caretakerRows] = await connection.execute(
+      'SELECT caretaker_id, email FROM caretakers WHERE caretaker_id = ? LIMIT 1',
+      [caretakerId]
+    );
+
+    if (caretakerRows.length === 0) {
+      connection.release();
+      return res.status(404).json({ error: 'Caretaker not found' });
+    }
+
+    const caretakerEmail = caretakerRows[0].email || null;
+
+    await connection.beginTransaction();
+
+    await connection.execute('DELETE FROM leave_requests WHERE caretaker_id = ?', [caretakerId]);
+    await connection.execute('DELETE FROM caretaker_residents WHERE caretaker_id = ?', [caretakerId]);
+    await connection.execute('DELETE FROM caretakers WHERE caretaker_id = ?', [caretakerId]);
+
+    if (caretakerEmail) {
+      await connection.execute('DELETE FROM users WHERE LOWER(email) = LOWER(?) AND role = ?', [caretakerEmail, 'caretaker']);
+    }
+
+    await connection.commit();
+    connection.release();
+
+    res.json({ message: 'Caretaker removed', caretakerId });
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch {
+      // ignore rollback error
+    }
+    connection.release();
+    console.error('[Caretakers] Delete error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── Leave Requests ──
 
 // GET /api/caretakers/all/leave-requests

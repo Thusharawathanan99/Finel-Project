@@ -148,6 +148,7 @@ export const caretakersApi = {
   getById: (id: string) => apiGet<any>(`/caretakers/${id}`),
   create: (data: any) => apiPost<any>('/caretakers', data),
   update: (id: string, data: any) => apiPut<any>(`/caretakers/${id}`, data),
+  delete: (id: string) => apiDelete<any>(`/caretakers/${id}`),
   assignResident: (caretakerId: string, residentId: string) =>
     apiPost<any>(`/caretakers/${caretakerId}/assign-resident`, { residentId }),
   getLeaveRequests: (id: string) => apiGet<any[]>(`/caretakers/${id}/leave-requests`),
@@ -182,7 +183,9 @@ export const emotionsApi = {
 // --- System Components ---
 export const systemApi = {
   getComponents: () => apiGet<any[]>('/system/components'),
+  create: (data: any) => apiPost<any>('/system/components', data),
   updateComponent: (id: string, data: any) => apiPut<any>(`/system/components/${id}`, data),
+  delete: (id: string) => apiDelete(`/system/components/${id}`),
 };
 
 // --- Meal Plans ---

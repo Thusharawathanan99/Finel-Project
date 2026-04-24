@@ -5,7 +5,7 @@ import { Resident, PersonalDetails } from '../models/Resident';
 import { Caretaker } from '../models/Caretaker';
 import { SystemComponent, SystemStatus } from '../models/SystemComponent';
 import { createCaretakerAccount } from '../services/firebaseAuthService';
-import { caretakersApi } from '../services/apiService';
+import { caretakersApi, residentsApi, systemApi } from '../services/apiService';
 import { 
   Shield, 
   Users, 
@@ -86,44 +86,82 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     description: '',
     status: 'online' as SystemStatus
   });
+  const [systemFormError, setSystemFormError] = useState('');
+  const [systemSubmitting, setSystemSubmitting] = useState(false);
+
+  const [residentFormError, setResidentFormError] = useState('');
+  const [residentSubmitting, setResidentSubmitting] = useState(false);
 
   const [replacementCaretaker, setReplacementCaretaker] = useState('');
 
-  const handleAddResident = () => {
-    const resident = new Resident(
-      `R${Date.now()}`,
-      residentForm.name,
-      parseInt(residentForm.age)
-    );
-    
-    const details: PersonalDetails = {
-      roomNumber: residentForm.roomNumber,
-      floorNumber: residentForm.floorNumber,
-      address: residentForm.address,
-      city: residentForm.city,
-      state: residentForm.state,
-      zipCode: residentForm.zipCode,
-      emergencyContactName: residentForm.emergencyContactName,
-      emergencyContactPhone: residentForm.emergencyContactPhone,
-      emergencyContactRelation: residentForm.emergencyContactRelation,
-      admissionDate: new Date()
-    };
-    
-    resident.updatePersonalDetails(details);
-    dashboard.addResident(resident);
-    setShowAddResident(false);
-    setResidentForm({
-      name: '', age: '', roomNumber: '', floorNumber: '', address: '', city: '',
-      state: '', zipCode: '', emergencyContactName: '', emergencyContactPhone: '',
-      emergencyContactRelation: ''
-    });
-    onRefresh();
+  const handleAddResident = async () => {
+    setResidentFormError('');
+    setResidentSubmitting(true);
+    try {
+      const residentId = `R${Date.now()}`;
+      
+      const payload = {
+        residentId,
+        name: residentForm.name,
+        age: parseInt(residentForm.age),
+        roomNumber: residentForm.roomNumber,
+        floorNumber: residentForm.floorNumber,
+        address: residentForm.address,
+        city: residentForm.city,
+        state: residentForm.state,
+        zipCode: residentForm.zipCode,
+        emergencyContactName: residentForm.emergencyContactName,
+        emergencyContactPhone: residentForm.emergencyContactPhone,
+        emergencyContactRelation: residentForm.emergencyContactRelation,
+        admissionDate: new Date().toISOString().split('T')[0]
+      };
+
+      await residentsApi.create(payload);
+
+      const resident = new Resident(
+        residentId,
+        residentForm.name,
+        parseInt(residentForm.age)
+      );
+      
+      resident.updatePersonalDetails({
+        roomNumber: residentForm.roomNumber,
+        floorNumber: residentForm.floorNumber,
+        address: residentForm.address,
+        city: residentForm.city,
+        state: residentForm.state,
+        zipCode: residentForm.zipCode,
+        emergencyContactName: residentForm.emergencyContactName,
+        emergencyContactPhone: residentForm.emergencyContactPhone,
+        emergencyContactRelation: residentForm.emergencyContactRelation,
+        admissionDate: new Date()
+      });
+      
+      dashboard.addResident(resident);
+      setShowAddResident(false);
+      setResidentForm({
+        name: '', age: '', roomNumber: '', floorNumber: '', address: '', city: '',
+        state: '', zipCode: '', emergencyContactName: '', emergencyContactPhone: '',
+        emergencyContactRelation: ''
+      });
+      onRefresh();
+    } catch (error: any) {
+      setResidentFormError(error?.message || 'Failed to add resident');
+    } finally {
+      setResidentSubmitting(false);
+    }
   };
 
-  const handleRemoveResident = (residentId: string) => {
+  const handleRemoveResident = async (residentId: string) => {
     if (confirm('Are you sure you want to remove this resident?')) {
-      dashboard.removeResident(residentId);
-      onRefresh();
+      try {
+        await residentsApi.delete(residentId);
+        dashboard.removeResident(residentId);
+        onRefresh();
+      } catch (error) {
+        console.error('Failed to remove resident:', error);
+        alert('Failed to remove resident. Please try again.');
+      }
     }
   };
 
@@ -176,25 +214,50 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     setShowAddCaretaker(true);
   };
 
-  const handleRemoveCaretaker = (caretakerId: string) => {
-    if (confirm('Are you sure you want to remove this caretaker?')) {
+  const handleRemoveCaretaker = async (caretakerId: string) => {
+    if (!confirm('Are you sure you want to remove this caretaker?')) {
+      return;
+    }
+
+    try {
+      await caretakersApi.delete(caretakerId);
       dashboard.removeCaretaker(caretakerId);
       onRefresh();
+    } catch (error) {
+      console.error('Failed to remove caretaker:', error);
+      alert('Failed to remove caretaker. Please try again.');
     }
   };
 
-  const handleAddSystem = () => {
-    const system = new SystemComponent(
-      `SYS-${Date.now()}`,
-      systemForm.name,
-      systemForm.version,
-      systemForm.description,
-      systemForm.status
-    );
-    dashboard.addSystemComponent(system);
-    setShowAddSystem(false);
-    setSystemForm({ name: '', version: '', description: '', status: 'online' });
-    onRefresh();
+  const handleAddSystem = async () => {
+    setSystemFormError('');
+    setSystemSubmitting(true);
+    try {
+      const componentId = `SYS-${Date.now()}`;
+      await systemApi.create({
+        componentId,
+        name: systemForm.name,
+        version: systemForm.version,
+        description: systemForm.description,
+        status: systemForm.status
+      });
+
+      const system = new SystemComponent(
+        componentId,
+        systemForm.name,
+        systemForm.version,
+        systemForm.description,
+        systemForm.status
+      );
+      dashboard.addSystemComponent(system);
+      setShowAddSystem(false);
+      setSystemForm({ name: '', version: '', description: '', status: 'online' });
+      onRefresh();
+    } catch (error: any) {
+      setSystemFormError(error?.message || 'Failed to add system component');
+    } finally {
+      setSystemSubmitting(false);
+    }
   };
 
   const handleToggleSystemStatus = (componentId: string, currentStatus: SystemStatus) => {
@@ -208,10 +271,16 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     }
   };
 
-  const handleRemoveSystem = (componentId: string) => {
+  const handleRemoveSystem = async (componentId: string) => {
     if (confirm('Remove this system component?')) {
-      dashboard.removeSystemComponent(componentId);
-      onRefresh();
+      try {
+        await systemApi.delete(componentId);
+        dashboard.removeSystemComponent(componentId);
+        onRefresh();
+      } catch (error) {
+        console.error('Failed to remove system component:', error);
+        alert('Failed to remove component. Please try again.');
+      }
     }
   };
 
@@ -710,17 +779,23 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-blue-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
               <h3 className="font-semibold text-base">Add New Resident</h3>
-              <button onClick={() => setShowAddResident(false)} className="p-1">
+              <button onClick={() => setShowAddResident(false)} className="p-1" disabled={residentSubmitting}>
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="p-4 space-y-3">
+              {residentFormError && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                  {residentFormError}
+                </div>
+              )}
               <input
                 type="text"
                 placeholder="Full Name"
                 value={residentForm.name}
                 onChange={(e) => setResidentForm({ ...residentForm, name: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <div className="grid grid-cols-2 gap-2">
                 <input
@@ -800,15 +875,23 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 <button
                   onClick={() => setShowAddResident(false)}
                   className="py-2.5 border-2 border-gray-300 text-gray-700 rounded-lg font-medium text-sm"
+                  disabled={residentSubmitting}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleAddResident}
-                  disabled={!residentForm.name || !residentForm.age}
-                  className="py-2.5 bg-blue-500 text-white rounded-lg font-medium text-sm disabled:opacity-50"
+                  disabled={!residentForm.name || !residentForm.age || residentSubmitting}
+                  className="py-2.5 bg-blue-500 text-white rounded-lg font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  Add Resident
+                  {residentSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    'Add Resident'
+                  )}
                 </button>
               </div>
             </div>
@@ -908,17 +991,23 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
             <div className="bg-purple-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
               <h3 className="font-semibold text-base">Add System Component</h3>
-              <button onClick={() => setShowAddSystem(false)} className="p-1">
+              <button onClick={() => setShowAddSystem(false)} className="p-1" disabled={systemSubmitting}>
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="p-4 space-y-3">
+              {systemFormError && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                  {systemFormError}
+                </div>
+              )}
               <input
                 type="text"
                 placeholder="System Name"
                 value={systemForm.name}
                 onChange={(e) => setSystemForm({ ...systemForm, name: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={systemSubmitting}
               />
               <input
                 type="text"
@@ -947,15 +1036,23 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 <button
                   onClick={() => setShowAddSystem(false)}
                   className="py-2.5 border-2 border-gray-300 text-gray-700 rounded-lg font-medium text-sm"
+                  disabled={systemSubmitting}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleAddSystem}
-                  disabled={!systemForm.name || !systemForm.version}
-                  className="py-2.5 bg-purple-500 text-white rounded-lg font-medium text-sm disabled:opacity-50"
+                  disabled={!systemForm.name || !systemForm.version || systemSubmitting}
+                  className="py-2.5 bg-purple-500 text-white rounded-lg font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  Add System
+                  {systemSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    'Add System'
+                  )}
                 </button>
               </div>
             </div>

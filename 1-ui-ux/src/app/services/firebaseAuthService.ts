@@ -346,13 +346,11 @@ export async function signIn(email: string, password: string): Promise<AppUser> 
     };
   }
 
-  // Fallback: return basic info from Firebase if MySQL record missing
-  return {
-    uid: firebaseUser.uid,
-    name: firebaseUser.displayName || '',
-    email: firebaseUser.email || '',
-    role: isDefaultAdminEmail(firebaseUser.email || normalizedEmail) ? 'admin' : 'patient',
-  };
+  if (response.status === 404) {
+    throw new Error('Your account profile was not found. It may have been removed by admin.');
+  }
+
+  throw new Error(`Unable to load user profile (${response.status}). Please try again.`);
 }
 
 /**
@@ -489,15 +487,14 @@ export async function fetchUserProfile(firebaseUser: FirebaseUser): Promise<AppU
         role: 'admin',
       };
     }
+
+    if (response.status === 404) {
+      throw new Error('User profile not found. Please sign in again or contact admin.');
+    }
+
+    throw new Error(`Unable to load profile (${response.status}).`);
   } catch (err) {
     console.warn('[Auth] Could not fetch user profile from API:', err);
+    throw err;
   }
-
-  // Fallback
-  return {
-    uid: firebaseUser.uid,
-    name: firebaseUser.displayName || '',
-    email: firebaseUser.email || '',
-    role: isDefaultAdminEmail(firebaseUser.email || '') ? 'admin' : 'patient',
-  };
 }

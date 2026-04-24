@@ -15,6 +15,29 @@ router.get('/', async (req, res) => {
   }
 });
 
+// POST /api/system/components
+router.post('/', async (req, res) => {
+  try {
+    const { componentId, name, version, description, status } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ error: 'name is required' });
+    }
+
+    const id = componentId || `SYS-${Date.now()}`;
+
+    await pool.execute(
+      'INSERT INTO system_components (component_id, name, version, description, status) VALUES (?, ?, ?, ?, ?)',
+      [id, name, version || null, description || null, status || 'online']
+    );
+
+    res.status(201).json({ message: 'Component created', componentId: id });
+  } catch (error) {
+    console.error('[System] Create error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // PUT /api/system/components/:id — Update component status
 router.put('/:id', async (req, res) => {
   try {
@@ -36,6 +59,18 @@ router.put('/:id', async (req, res) => {
     res.json({ message: 'Component updated' });
   } catch (error) {
     console.error('[System] Update error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/system/components/:id
+router.delete('/:id', async (req, res) => {
+  try {
+    const componentId = req.params.id;
+    await pool.execute('DELETE FROM system_components WHERE component_id = ?', [componentId]);
+    res.json({ message: 'Component deleted' });
+  } catch (error) {
+    console.error('[System] Delete error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
