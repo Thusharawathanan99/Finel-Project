@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
-import { generateMealPlan, loadSavedMealPlan, clearMealPlanCache, MealPlanRequest } from '../ml/meal-plan/MealPlanEngine';
+import { useState, useEffect } from 'react';
+import { loadSavedMealPlan } from '../ml/meal-plan/MealPlanEngine';
 import { WeeklyMealPlan, DailyMealPlan } from '../ml/meal-plan/MealPlan';
 import { Resident } from '../models/Resident';
-import { Loader2, Calendar as CalendarIcon, Info, RefreshCw, Utensils, Beaker, CheckCircle } from 'lucide-react';
+import { Loader2, Info, Utensils, Beaker } from 'lucide-react';
 
 interface MealPlanViewProps {
   resident: Resident;
@@ -13,47 +13,21 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<number>(0); // 0 = Monday, etc.
-  const prevMedCount = useRef<number>(-1);
 
   const medCount = resident.getAllMedications().length;
 
-  const buildRequest = (): MealPlanRequest => {
-    const meds = resident.getAllMedications().map(m => ({
-      name: m.drugName,
-      dosage: m.dosage,
-      frequency: m.frequency,
-    }));
-
-    return {
-      residentId: resident.residentId,
-      residentName: resident.name,
-      age: resident.age || 70,
-      medications: meds,
-      allergies: resident.personalDetails.allergies || [],
-      medicalHistory: resident.personalDetails.medicalHistory || '',
-      dietaryRestrictions: resident.personalDetails.dietaryRestrictions || [],
-    };
-  };
-
   /**
-   * Load meal plan: Try DB first, only call Gemini if nothing is saved
-   * or if medications changed since the last plan was generated.
+   * Load meal plan from DB only (read-only for patients).
+   * Caretaker generates plans; patient can only view.
    */
   const loadMealPlan = async () => {
     setLoading(true);
     setError(null);
     try {
-      // Try loading from database first (no Gemini API call)
       const savedPlan = await loadSavedMealPlan(resident.residentId, medCount);
       if (savedPlan) {
         setMealPlan(savedPlan);
-        setLoading(false);
-        return;
       }
-
-      // No saved plan (or stale) — generate a fresh one via Gemini
-      const plan = await generateMealPlan(buildRequest());
-      setMealPlan(plan);
       setLoading(false);
     } catch (err: any) {
       console.error('Failed to load meal plan:', err);
@@ -62,34 +36,8 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
     }
   };
 
-  /**
-   * Force regenerate: Clear caches + DB, then call Gemini for a fresh plan.
-   */
-  const regenerateMealPlan = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      clearMealPlanCache(resident.residentId);
-      const plan = await generateMealPlan(buildRequest());
-      setMealPlan(plan);
-      setLoading(false);
-    } catch (err: any) {
-      console.error('Failed to regenerate meal plan:', err);
-      setError(err?.message || 'Failed to regenerate meal plan');
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    // On first mount or resident change, load from DB
-    // If medication count changed (new prescription), force regenerate
-    if (prevMedCount.current !== -1 && prevMedCount.current !== medCount) {
-      // Medication count changed — regenerate with new meds
-      regenerateMealPlan();
-    } else {
-      loadMealPlan();
-    }
-    prevMedCount.current = medCount;
+    loadMealPlan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resident.residentId, medCount]);
 
@@ -97,9 +45,9 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
     return (
       <div className="flex flex-col items-center justify-center py-16 bg-white rounded-2xl shadow-sm border border-gray-100">
         <Loader2 className="w-10 h-10 text-orange-500 animate-spin mb-4" />
-        <p className="text-gray-800 font-medium">Generating Personalized Meal Plan...</p>
+        <p className="text-gray-800 font-medium">Loading Meal Plan...</p>
         <p className="text-sm text-gray-500 mt-2 text-center max-w-sm">
-          Analyzing medications and dietary requirements to suggest the best meals for {resident.name}.
+          Checking for a saved meal plan for {resident.name}.
         </p>
       </div>
     );
@@ -108,15 +56,9 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
   if (error || !mealPlan) {
     return (
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 text-center">
-        <Utensils className="w-12 h-12 text-red-400 mx-auto mb-4" />
-        <h3 className="text-lg font-bold text-gray-800 mb-2">Meal Plan Unavailable</h3>
-        <p className="text-gray-600 mb-6">{error || 'Could not generate plan.'}</p>
-        <button 
-          onClick={() => regenerateMealPlan()}
-          className="px-6 py-2 bg-orange-500 text-white rounded-full font-medium active:scale-95 transition-transform"
-        >
-          Try Again
-        </button>
+        <Utensils className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+        <h3 className="text-lg font-bold text-gray-800 mb-2">No Meal Plan Available</h3>
+        <p className="text-gray-500">Your caretaker will generate a personalized meal plan based on your medications.</p>
       </div>
     );
   }
@@ -126,21 +68,12 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
   return (
     <div className="space-y-4">
       {/* Header section */}
-      <div className="bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl shadow-md p-5 text-white flex justify-between items-center flex-wrap gap-4">
-        <div>
-          <h2 className="text-xl font-bold flex items-center gap-2">
-            <Utensils className="w-5 h-5" />
-            Therapeutic Meal Plan
-          </h2>
-          <p className="text-sm text-orange-100 mt-1">Generated for {resident.name}</p>
-        </div>
-        <button 
-          onClick={() => fetchMealPlan(true)}
-          className="flex items-center gap-2 bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors backdrop-blur-sm"
-        >
-          <RefreshCw className="w-4 h-4" />
-          Regenerate
-        </button>
+      <div className="bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl shadow-md p-5 text-white">
+        <h2 className="text-xl font-bold flex items-center gap-2">
+          <Utensils className="w-5 h-5" />
+          Therapeutic Meal Plan
+        </h2>
+        <p className="text-sm text-orange-100 mt-1">Prepared for {resident.name} by your caretaker</p>
       </div>
 
       {/* Medication & Clinical warnings */}

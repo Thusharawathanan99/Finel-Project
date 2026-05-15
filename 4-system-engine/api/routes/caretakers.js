@@ -27,6 +27,25 @@ async function isAdminRequest(req) {
   }
 }
 
+/**
+ * Resolve an ID that may be a caretaker_id ("CT001") or Firebase UID to the actual caretaker_id.
+ * Returns the caretaker_id string, or null if not found.
+ */
+async function resolveCaretakerId(id) {
+  // 1. Check if it directly matches a caretaker_id
+  const [direct] = await pool.execute('SELECT caretaker_id FROM caretakers WHERE caretaker_id = ?', [id]);
+  if (direct.length > 0) return direct[0].caretaker_id;
+
+  // 2. Fall back: look up Firebase UID → email → caretaker
+  const [userRows] = await pool.execute('SELECT email FROM users WHERE id = ?', [id]);
+  if (userRows.length > 0) {
+    const [ctRows] = await pool.execute('SELECT caretaker_id FROM caretakers WHERE email = ?', [userRows[0].email]);
+    if (ctRows.length > 0) return ctRows[0].caretaker_id;
+  }
+
+  return null;
+}
+
 // GET /api/caretakers — List all caretakers
 router.get('/', async (req, res) => {
   try {
@@ -43,27 +62,72 @@ router.get('/', async (req, res) => {
   }
 });
 
+// PUT /api/caretakers/reassign-resident — Reassign a resident from one caretaker to another
+router.put('/reassign-resident', async (req, res) => {
+  try {
+    const { residentId, fromCaretakerId, toCaretakerId } = req.body;
+    if (!residentId || !toCaretakerId) {
+      return res.status(400).json({ error: 'residentId and toCaretakerId are required' });
+    }
+
+    // Remove old assignment(s) for this resident
+    if (fromCaretakerId) {
+      await pool.execute(
+        'DELETE FROM caretaker_residents WHERE caretaker_id = ? AND resident_id = ?',
+        [fromCaretakerId, residentId]
+      );
+    }
+
+    // Create new assignment
+    await pool.execute(
+      'INSERT IGNORE INTO caretaker_residents (caretaker_id, resident_id) VALUES (?, ?)',
+      [toCaretakerId, residentId]
+    );
+
+    res.json({ message: 'Resident reassigned', residentId, toCaretakerId });
+  } catch (error) {
+    console.error('[Caretakers] Reassign error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /api/caretakers/:id — Get single caretaker
+// Supports lookup by caretaker_id (e.g. "CT001") OR Firebase UID (falls back to email match)
 router.get('/:id', async (req, res) => {
   try {
-    const [rows] = await pool.execute(`
+    // 1. Try direct lookup by caretaker_id
+    let [rows] = await pool.execute(`
       SELECT c.*,
         (SELECT JSON_ARRAYAGG(cr.resident_id) FROM caretaker_residents cr WHERE cr.caretaker_id = c.caretaker_id) as assigned_residents
       FROM caretakers c
       WHERE c.caretaker_id = ?
     `, [req.params.id]);
 
+    // 2. If not found, the :id might be a Firebase UID — look up user's email, then find caretaker by email
+    if (rows.length === 0) {
+      const [userRows] = await pool.execute('SELECT email FROM users WHERE id = ?', [req.params.id]);
+      if (userRows.length > 0) {
+        [rows] = await pool.execute(`
+          SELECT c.*,
+            (SELECT JSON_ARRAYAGG(cr.resident_id) FROM caretaker_residents cr WHERE cr.caretaker_id = c.caretaker_id) as assigned_residents
+          FROM caretakers c
+          WHERE c.email = ?
+        `, [userRows[0].email]);
+      }
+    }
+
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Caretaker not found' });
     }
 
+    const caretaker = rows[0];
+
     // Get leave requests
     const [leaveRequests] = await pool.execute(
       'SELECT * FROM leave_requests WHERE caretaker_id = ? ORDER BY request_date DESC',
-      [req.params.id]
+      [caretaker.caretaker_id]
     );
 
-    const caretaker = rows[0];
     caretaker.leaveRequests = leaveRequests;
 
     res.json(caretaker);
@@ -170,9 +234,12 @@ router.get('/all/leave-requests', async (req, res) => {
 // GET /api/caretakers/:id/leave-requests
 router.get('/:id/leave-requests', async (req, res) => {
   try {
+    const caretakerId = await resolveCaretakerId(req.params.id);
+    if (!caretakerId) return res.status(404).json({ error: 'Caretaker not found' });
+
     const [rows] = await pool.execute(
       'SELECT * FROM leave_requests WHERE caretaker_id = ? ORDER BY request_date DESC',
-      [req.params.id]
+      [caretakerId]
     );
     res.json(rows);
   } catch (error) {
@@ -184,6 +251,9 @@ router.get('/:id/leave-requests', async (req, res) => {
 // POST /api/caretakers/:id/leave-requests
 router.post('/:id/leave-requests', async (req, res) => {
   try {
+    const caretakerId = await resolveCaretakerId(req.params.id);
+    if (!caretakerId) return res.status(404).json({ error: 'Caretaker not found' });
+
     const { startDate, endDate, reason, caretakerName } = req.body;
     const requestId = `LR-${Date.now()}`;
     const days = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
@@ -191,7 +261,7 @@ router.post('/:id/leave-requests', async (req, res) => {
     await pool.execute(
       `INSERT INTO leave_requests (request_id, caretaker_id, caretaker_name, start_date, end_date, number_of_days, reason)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [requestId, req.params.id, caretakerName || '', startDate, endDate, days, reason || '']
+      [requestId, caretakerId, caretakerName || '', startDate, endDate, days, reason || '']
     );
 
     res.status(201).json({ message: 'Leave request created', requestId });
@@ -215,6 +285,26 @@ router.put('/:caretakerId/leave-requests/:requestId', async (req, res) => {
     res.json({ message: 'Leave request updated' });
   } catch (error) {
     console.error('[LeaveRequests] Update error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/caretakers/:id/unassign-resident — Remove a resident from a caretaker
+router.delete('/:id/unassign-resident', async (req, res) => {
+  try {
+    const { residentId } = req.body;
+    if (!residentId) {
+      return res.status(400).json({ error: 'residentId is required' });
+    }
+
+    await pool.execute(
+      'DELETE FROM caretaker_residents WHERE caretaker_id = ? AND resident_id = ?',
+      [req.params.id, residentId]
+    );
+
+    res.json({ message: 'Resident unassigned from caretaker', caretakerId: req.params.id, residentId });
+  } catch (error) {
+    console.error('[Caretakers] Unassign resident error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

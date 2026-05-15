@@ -25,6 +25,10 @@ import emotionsRoutes from './routes/emotions.js';
 import systemRoutes from './routes/system.js';
 import mealplansRoutes from './routes/mealplans.js';
 import analyzeRoutes from './routes/analyze.js';
+import doctorsRoutes from './routes/doctors.js';
+import notificationsRoutes from './routes/notifications.js';
+import sosRoutes from './routes/sos.js';
+import complaintsRoutes from './routes/complaints.js';
 
 const app = express();
 const PORT = process.env.API_PORT || 3001;
@@ -59,6 +63,10 @@ app.use('/api', emotionsRoutes);            // Handles /api/emotions and /api/re
 app.use('/api/system/components', systemRoutes);
 app.use('/api', mealplansRoutes);              // Handles /api/residents/:id/meal-plan
 app.use('/api', analyzeRoutes);                // Handles /api/analyze-prescription
+app.use('/api/doctors', doctorsRoutes);         // Handles /api/doctors CRUD
+app.use('/api', notificationsRoutes);             // Handles /api/residents/:id/notifications
+app.use('/api', sosRoutes);                          // Handles /api/sos-alerts
+app.use('/api', complaintsRoutes);                     // Handles /api/complaints + /api/residents/:id/complaints
 
 // ──────────────────────────────────────────────
 // Error Handling

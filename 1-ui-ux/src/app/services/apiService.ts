@@ -2,7 +2,12 @@
 // Automatically attaches Firebase Auth token to all requests
 import { getIdToken } from './firebaseAuthService';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+// Auto-detect: if served from Cloudflare tunnel, use the tunneled API;
+// otherwise use the local dev server.
+const isTunnel = typeof window !== 'undefined' && window.location.hostname.endsWith('.careconnect.website');
+const API_URL = isTunnel
+  ? 'https://api.careconnect.website/api'
+  : (import.meta.env.VITE_API_URL || 'http://localhost:3001/api');
 
 interface RequestOptions {
   headers?: Record<string, string>;
@@ -116,6 +121,7 @@ export const residentsApi = {
   create: (data: any) => apiPost<any>('/residents', data),
   update: (id: string, data: any) => apiPut<any>(`/residents/${id}`, data),
   delete: (id: string) => apiDelete(`/residents/${id}`),
+  getCaretakers: (id: string) => apiGet<any[]>(`/residents/${id}/caretakers`),
 };
 
 // --- Prescriptions ---
@@ -155,6 +161,8 @@ export const caretakersApi = {
   createLeaveRequest: (id: string, data: any) => apiPost<any>(`/caretakers/${id}/leave-requests`, data),
   updateLeaveRequest: (caretakerId: string, requestId: string, data: any) =>
     apiPut<any>(`/caretakers/${caretakerId}/leave-requests/${requestId}`, data),
+  reassignResident: (data: { residentId: string; fromCaretakerId?: string; toCaretakerId: string }) =>
+    apiPut<any>('/caretakers/reassign-resident', data),
 };
 
 // --- Appointments ---
@@ -177,6 +185,19 @@ export const emotionsApi = {
     relatedMedicine?: string | null;
     note?: string | null;
   }) => apiPost<any>('/emotions', data),
+  analyzeImage: (base64Image: string) => apiPost<{
+    emotionLabel: string;
+    stateScore: number;
+    category: string;
+    note: string;
+  }>('/emotions/analyze-image', { image: base64Image }),
+  createWellnessAlert: (data: {
+    residentId: string;
+    emotionLabel: string;
+    stateScore: number;
+    category: string;
+    note: string;
+  }) => apiPost<any>('/emotions/wellness-alert', data),
 };
 
 // --- System Components ---
@@ -193,4 +214,32 @@ export const mealPlansApi = {
     apiPost<any>(`/residents/${residentId}/meal-plan`, { plan, medicationCount }),
   delete: (residentId: string) =>
     apiDelete(`/residents/${residentId}/meal-plan`),
+};
+
+// --- Doctors ---
+export const doctorsApi = {
+  getAll: () => apiGet<any[]>('/doctors'),
+  get: (id: number) => apiGet<any>(`/doctors/${id}`),
+  create: (data: { name: string; specialization?: string; phone?: string; email?: string; hospital?: string }) =>
+    apiPost<any>('/doctors', data),
+  update: (id: number, data: any) => apiPut<any>(`/doctors/${id}`, data),
+  delete: (id: number) => apiDelete(`/doctors/${id}`),
+};
+
+// --- SOS Alerts ---
+export const sosApi = {
+  getActive: () => apiGet<any[]>('/sos-alerts'),
+  getAll: () => apiGet<any[]>('/sos-alerts?all=true'),
+  resolve: (id: number, resolvedBy?: string) =>
+    apiPut<any>(`/sos-alerts/${id}/resolve`, { resolvedBy: resolvedBy || 'Admin' }),
+};
+
+// --- Complaints ---
+export const complaintsApi = {
+  getAll: (status?: string) => apiGet<any[]>(status ? `/complaints?status=${status}` : '/complaints'),
+  getForResident: (residentId: string) => apiGet<any[]>(`/residents/${residentId}/complaints`),
+  create: (data: { residentId: string; residentName?: string; subject: string; message: string }) =>
+    apiPost<any>('/complaints', data),
+  respond: (id: number, data: { status?: string; adminResponse?: string; respondedBy?: string }) =>
+    apiPut<any>(`/complaints/${id}`, data),
 };

@@ -1,23 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Alert, Modal, TextInput, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { apiFetch, getResidentId } from '../apiHelper';
-import { auth } from '../firebase/config';
 
 const AppointmentsScreen = ({ navigation }) => {
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [showBookModal, setShowBookModal] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-
-  // Booking form state
-  const [doctorName, setDoctorName] = useState('');
-  const [specialization, setSpecialization] = useState('');
-  const [appointmentDate, setAppointmentDate] = useState('');
-  const [appointmentTime, setAppointmentTime] = useState('');
-  const [reason, setReason] = useState('');
 
   const fetchAppointments = useCallback(async () => {
     try {
@@ -37,81 +27,6 @@ const AppointmentsScreen = ({ navigation }) => {
   }, []);
 
   useEffect(() => { fetchAppointments(); }, [fetchAppointments]);
-
-  const handleBookAppointment = async () => {
-    if (!doctorName.trim() || !appointmentDate.trim()) {
-      Alert.alert('Required', 'Doctor name and date are required.');
-      return;
-    }
-
-    // Validate date format YYYY-MM-DD
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate.trim())) {
-      Alert.alert('Invalid Date', 'Please enter date in YYYY-MM-DD format (e.g. 2026-05-01).');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      const residentId = await getResidentId();
-      const user = auth.currentUser;
-      const res = await apiFetch('/appointments', {
-        method: 'POST',
-        body: JSON.stringify({
-          residentId,
-          residentName: user?.displayName || 'Patient',
-          doctorName: doctorName.trim(),
-          specialization: specialization.trim(),
-          appointmentDate: appointmentDate.trim(),
-          appointmentTime: appointmentTime.trim() || '09:00 AM',
-          reason: reason.trim() || 'General Checkup',
-        }),
-      });
-
-      if (!res.ok) throw new Error('Failed to book');
-      Alert.alert('Booked!', 'Your appointment has been scheduled.');
-      setShowBookModal(false);
-      resetForm();
-      fetchAppointments();
-    } catch (err) {
-      console.error('[Appointments] Book error:', err);
-      Alert.alert('Error', 'Could not book the appointment.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleCancelAppointment = (apt) => {
-    Alert.alert(
-      'Cancel Appointment',
-      `Cancel your appointment with ${apt.doctor_name || 'the doctor'}?`,
-      [
-        { text: 'Keep', style: 'cancel' },
-        {
-          text: 'Cancel It', style: 'destructive',
-          onPress: async () => {
-            try {
-              const res = await apiFetch(`/appointments/${apt.appointment_id}`, {
-                method: 'PUT',
-                body: JSON.stringify({ status: 'cancelled' }),
-              });
-              if (!res.ok) throw new Error('Failed');
-              fetchAppointments();
-            } catch (err) {
-              Alert.alert('Error', 'Could not cancel the appointment.');
-            }
-          }
-        }
-      ]
-    );
-  };
-
-  const resetForm = () => {
-    setDoctorName('');
-    setSpecialization('');
-    setAppointmentDate('');
-    setAppointmentTime('');
-    setReason('');
-  };
 
   // Find next upcoming appointment
   const today = new Date().toISOString().split('T')[0];
@@ -150,10 +65,8 @@ const AppointmentsScreen = ({ navigation }) => {
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
           <MaterialCommunityIcons name="arrow-left" size={24} color="#1E293B" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Appointments</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={() => setShowBookModal(true)}>
-          <MaterialCommunityIcons name="plus" size={24} color="#F59E0B" />
-        </TouchableOpacity>
+        <Text style={styles.headerTitle}>My Appointments</Text>
+        <View style={{ width: 40 }} />
       </View>
 
       <ScrollView
@@ -167,7 +80,7 @@ const AppointmentsScreen = ({ navigation }) => {
             <View>
               <Text style={styles.bannerTitle}>{nextApt ? 'Next Appointment' : 'No Upcoming'}</Text>
               <Text style={styles.bannerSubtitle}>
-                {nextApt ? getDaysUntil(nextApt.appointment_date) : 'Book one below'}
+                {nextApt ? getDaysUntil(nextApt.appointment_date) : 'Your caretaker will book one'}
               </Text>
             </View>
             {nextApt && (
@@ -187,25 +100,30 @@ const AppointmentsScreen = ({ navigation }) => {
           <View style={styles.emptyState}>
             <MaterialCommunityIcons name="calendar-blank" size={48} color="#CBD5E1" />
             <Text style={styles.emptyTitle}>No Appointments</Text>
-            <Text style={styles.emptySubtitle}>Book your first appointment with a doctor.</Text>
+            <Text style={styles.emptySubtitle}>Your caretaker will book appointments for you.</Text>
           </View>
         ) : (
           <View style={styles.listContainer}>
             {appointments.map((apt) => {
               const isCancelled = apt.status === 'cancelled';
               const isPast = apt.appointment_date < today;
+              const isToday = apt.appointment_date && apt.appointment_date.substring(0, 10) === today;
               return (
-                <View key={apt.appointment_id} style={[styles.aptCard, isCancelled && styles.aptCardCancelled]}>
+                <View key={apt.appointment_id} style={[styles.aptCard, isCancelled && styles.aptCardCancelled, isToday && !isCancelled && { borderColor: '#FCA5A5', borderWidth: 2, backgroundColor: '#FFF5F5' }]}>
                   <View style={styles.aptHeader}>
-                    <View style={styles.dateTimeBadge}>
-                      <MaterialCommunityIcons name="calendar-clock" size={16} color="#B45309" style={{ marginRight: 6 }} />
-                      <Text style={styles.dateTimeText}>
+                    <View style={[styles.dateTimeBadge, isToday && !isCancelled && { backgroundColor: '#FEE2E2' }]}>
+                      <MaterialCommunityIcons name={isToday ? 'calendar-alert' : 'calendar-clock'} size={16} color={isToday && !isCancelled ? '#DC2626' : '#B45309'} style={{ marginRight: 6 }} />
+                      <Text style={[styles.dateTimeText, isToday && !isCancelled && { color: '#991B1B' }]}>
                         {formatDate(apt.appointment_date)}{apt.appointment_time ? ` at ${apt.appointment_time}` : ''}
                       </Text>
                     </View>
                     {isCancelled ? (
                       <View style={[styles.typeBadge, { backgroundColor: '#FEE2E2' }]}>
                         <Text style={{ fontSize: 10, fontWeight: '700', color: '#DC2626' }}>CANCELLED</Text>
+                      </View>
+                    ) : isToday ? (
+                      <View style={[styles.typeBadge, { backgroundColor: '#EF4444' }]}>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: '#FFFFFF' }}>TODAY</Text>
                       </View>
                     ) : (
                       <View style={[styles.typeBadge, { backgroundColor: isPast ? '#F1F5F9' : '#DCFCE7' }]}>
@@ -235,70 +153,13 @@ const AppointmentsScreen = ({ navigation }) => {
                       <MaterialCommunityIcons name="text-box-outline" size={16} color="#94A3B8" style={{ marginRight: 6 }} />
                       <Text style={styles.reasonText}>{apt.reason || 'General Checkup'}</Text>
                     </View>
-                    {!isCancelled && !isPast && (
-                      <TouchableOpacity onPress={() => handleCancelAppointment(apt)}>
-                        <MaterialCommunityIcons name="close-circle-outline" size={22} color="#EF4444" />
-                      </TouchableOpacity>
-                    )}
                   </View>
                 </View>
               );
             })}
           </View>
         )}
-
-        {/* Book Button */}
-        <TouchableOpacity style={styles.bookBtn} onPress={() => setShowBookModal(true)}>
-          <MaterialCommunityIcons name="calendar-plus" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
-          <Text style={styles.bookBtnText}>Book New Appointment</Text>
-        </TouchableOpacity>
       </ScrollView>
-
-      {/* Booking Modal */}
-      <Modal visible={showBookModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Book Appointment</Text>
-              <TouchableOpacity onPress={() => { setShowBookModal(false); resetForm(); }}>
-                <MaterialCommunityIcons name="close" size={24} color="#64748B" />
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.inputLabel}>Doctor Name *</Text>
-              <TextInput style={styles.input} placeholder="Dr. Jane Smith" value={doctorName} onChangeText={setDoctorName} placeholderTextColor="#9CA3AF" />
-
-              <Text style={styles.inputLabel}>Specialization</Text>
-              <TextInput style={styles.input} placeholder="Cardiologist, General, etc." value={specialization} onChangeText={setSpecialization} placeholderTextColor="#9CA3AF" />
-
-              <Text style={styles.inputLabel}>Date * (YYYY-MM-DD)</Text>
-              <TextInput style={styles.input} placeholder="2026-05-01" value={appointmentDate} onChangeText={setAppointmentDate} placeholderTextColor="#9CA3AF" />
-
-              <Text style={styles.inputLabel}>Time</Text>
-              <TextInput style={styles.input} placeholder="10:00 AM" value={appointmentTime} onChangeText={setAppointmentTime} placeholderTextColor="#9CA3AF" />
-
-              <Text style={styles.inputLabel}>Reason</Text>
-              <TextInput style={styles.input} placeholder="Routine Checkup" value={reason} onChangeText={setReason} placeholderTextColor="#9CA3AF" />
-
-              <TouchableOpacity
-                style={[styles.submitBtn, submitting && { opacity: 0.6 }]}
-                onPress={handleBookAppointment}
-                disabled={submitting}
-              >
-                {submitting ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <>
-                    <MaterialCommunityIcons name="check-circle" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
-                    <Text style={styles.submitBtnText}>Confirm Booking</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 };
@@ -314,7 +175,6 @@ const styles = StyleSheet.create({
   },
   backBtn: { padding: 8, backgroundColor: '#F1F5F9', borderRadius: 20 },
   headerTitle: { fontSize: 20, fontWeight: '700', color: '#1E293B' },
-  addBtn: { padding: 8, backgroundColor: '#FEF3C7', borderRadius: 20 },
 
   scrollContainer: { padding: 24, paddingBottom: 40 },
 
@@ -336,7 +196,7 @@ const styles = StyleSheet.create({
 
   emptyState: { alignItems: 'center', paddingVertical: 40 },
   emptyTitle: { fontSize: 18, fontWeight: '700', color: '#64748B', marginTop: 16, marginBottom: 4 },
-  emptySubtitle: { fontSize: 14, color: '#94A3B8' },
+  emptySubtitle: { fontSize: 14, color: '#94A3B8', textAlign: 'center' },
 
   listContainer: { gap: 16 },
   aptCard: {
@@ -357,33 +217,6 @@ const styles = StyleSheet.create({
 
   aptFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F8FAFC', padding: 12, borderRadius: 12 },
   reasonText: { fontSize: 13, color: '#475569', fontWeight: '500' },
-
-  bookBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#F59E0B', paddingVertical: 16, borderRadius: 16, marginTop: 32,
-    shadowColor: '#F59E0B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4
-  },
-  bookBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
-
-  // Modal styles
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalContent: {
-    backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28,
-    padding: 24, maxHeight: '85%',
-  },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
-  modalTitle: { fontSize: 22, fontWeight: '800', color: '#1E293B' },
-
-  inputLabel: { fontSize: 14, fontWeight: '600', color: '#475569', marginBottom: 6, marginTop: 12 },
-  input: {
-    backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 12,
-    padding: 14, fontSize: 15, color: '#1E293B',
-  },
-  submitBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#F59E0B', paddingVertical: 16, borderRadius: 16, marginTop: 24, marginBottom: 16,
-  },
-  submitBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
 });
 
 export default AppointmentsScreen;

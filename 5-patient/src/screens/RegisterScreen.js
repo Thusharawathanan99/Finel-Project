@@ -7,6 +7,7 @@ import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
 import { auth } from '../firebase/config';
 import Button from '../components/Button';
 import Input from '../components/Input';
+import { API_BASE } from '../apiHelper';
 
 const RegisterScreen = ({ navigation }) => {
   const [name, setName] = useState('');
@@ -20,8 +21,8 @@ const RegisterScreen = ({ navigation }) => {
 
   React.useEffect(() => {
     // Fetch caretakers from the Express API (4-system-engine)
-    // We use the secure Cloudflare tunnel to hit the backend
-    fetch('https://api.careconnect.website/api/caretakers')
+    // We use the configured API_BASE to hit the backend
+    fetch(`${API_BASE}/caretakers`)
       .then(res => res.json())
       .then(data => {
         setCaretakerList(data);
@@ -57,8 +58,8 @@ const RegisterScreen = ({ navigation }) => {
       await updateProfile(user, { displayName: name.trim() });
       const token = await user.getIdToken();
 
-      // We use the secure Cloudflare tunnel to hit the backend
-      const apiUrl = 'https://api.careconnect.website/api';
+      // We use the configured API_BASE to hit the backend
+      const apiUrl = API_BASE;
       
       // Generate Resident ID if not provided
       const finalResidentId = residentId?.trim() || `R-${user.uid.slice(0, 8).toUpperCase()}`;

@@ -211,6 +211,27 @@ CREATE TABLE IF NOT EXISTS meal_plans (
 );
 
 
+-- ──────────────────────────────────────────────
+-- Wellness Alerts (AI-generated patient distress alerts for caretakers)
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS wellness_alerts (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  resident_name VARCHAR(255),
+  emotion_label VARCHAR(50),
+  state_score INT,
+  category VARCHAR(20),
+  note TEXT COMMENT 'AI clinical observation',
+  severity ENUM('info', 'warning', 'critical') DEFAULT 'info',
+  acknowledged BOOLEAN DEFAULT FALSE,
+  acknowledged_by VARCHAR(255),
+  acknowledged_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+  INDEX idx_walert_resident (resident_id),
+  INDEX idx_walert_unacked (acknowledged, created_at)
+);
+
 -- ============================================================
 -- SEED DATA (matches existing sample data in App.tsx)
 -- ============================================================
@@ -287,3 +308,35 @@ INSERT IGNORE INTO emotional_states (resident_id, state_score, recorded_at) VALU
   ('R003', 68, NOW() - INTERVAL 2 HOUR),
   ('R003', 70, NOW() - INTERVAL 1 HOUR),
   ('R003', 72, NOW());
+
+-- ──────────────────────────────────────────────
+-- Doctors (created by admin)
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS doctors (
+  doctor_id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  specialization VARCHAR(255) DEFAULT NULL,
+  phone VARCHAR(50) DEFAULT NULL,
+  email VARCHAR(255) DEFAULT NULL,
+  hospital VARCHAR(255) DEFAULT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ──────────────────────────────────────────────
+-- Complaints (patient → admin)
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS complaints (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  resident_name VARCHAR(255) DEFAULT NULL,
+  subject VARCHAR(255) NOT NULL,
+  message TEXT NOT NULL,
+  status ENUM('pending', 'reviewed', 'resolved') DEFAULT 'pending',
+  admin_response TEXT DEFAULT NULL,
+  responded_by VARCHAR(255) DEFAULT NULL,
+  responded_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+  INDEX idx_complaint_status (status, created_at)
+);

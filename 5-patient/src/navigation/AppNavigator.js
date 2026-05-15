@@ -9,6 +9,8 @@ import UploadRxScreen from '../screens/UploadRxScreen';
 import MedicationsScreen from '../screens/MedicationsScreen';
 import MealPlanScreen from '../screens/MealPlanScreen';
 import AppointmentsScreen from '../screens/AppointmentsScreen';
+import LiveEmotionScreen from '../screens/LiveEmotionScreen';
+import ComplaintsScreen from '../screens/ComplaintsScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -23,6 +25,8 @@ const AppNavigator = () => {
         <Stack.Screen name="Medications" component={MedicationsScreen} />
         <Stack.Screen name="MealPlan" component={MealPlanScreen} />
         <Stack.Screen name="Appointments" component={AppointmentsScreen} />
+        <Stack.Screen name="LiveEmotion" component={LiveEmotionScreen} />
+        <Stack.Screen name="Complaints" component={ComplaintsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

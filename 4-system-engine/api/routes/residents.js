@@ -83,7 +83,24 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/residents — Create a new resident
+// GET /api/residents/:id/caretakers — Get assigned caretaker(s) for a resident
+router.get('/:id/caretakers', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT c.caretaker_id, c.name, c.email, c.phone, c.specialization, c.is_active
+      FROM caretakers c
+      INNER JOIN caretaker_residents cr ON cr.caretaker_id = c.caretaker_id
+      WHERE cr.resident_id = ?
+      ORDER BY c.name
+    `, [req.params.id]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error('[Residents] Get caretakers error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/', async (req, res) => {
   try {
     const {

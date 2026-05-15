@@ -1,4 +1,4 @@
-# ── Stage 1: Download and cache model weights ───────────────────────────────
+﻿# ΓöÇΓöÇ Stage 1: Download and cache model weights ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 # Using a full Python image just for pip + heavy model download
 FROM python:3.11-slim-bookworm AS model-downloader
 
@@ -13,7 +13,7 @@ RUN python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download(repo_id='naver-clova-ix/donut-base', cache_dir='/model-cache')"
 
-# ── Stage 2: Runtime ────────────────────────────────────────────────────────
+# ΓöÇΓöÇ Stage 2: Runtime ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 FROM python:3.11-slim-bookworm AS runner
 
 WORKDIR /app

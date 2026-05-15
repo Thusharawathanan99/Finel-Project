@@ -49,6 +49,11 @@ export default defineConfig({
   },
   // Load .env from project root (shared across all modules)
   envDir: path.resolve(__dirname, '..'),
+  // Bind to all interfaces so Cloudflare Tunnel can reach the dev server
+  server: {
+    host: true,
+    allowedHosts: ['admin.careconnect.website', '.careconnect.website'],
+  },
   optimizeDeps: {
     exclude: ['onnxruntime-web']
   }

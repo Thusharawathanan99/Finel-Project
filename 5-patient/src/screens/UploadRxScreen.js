@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Keyboa
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { API_BASE } from '../apiHelper';
 
 const UploadRxScreen = ({ navigation }) => {
   const [doctorName, setDoctorName] = useState('');
@@ -50,7 +51,7 @@ const UploadRxScreen = ({ navigation }) => {
       const user = auth.currentUser;
       const token = user ? await user.getIdToken() : '';
 
-      const res = await fetch('https://api.careconnect.website/api/analyze-prescription', {
+      const res = await fetch(`${API_BASE}/analyze-prescription`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -91,7 +92,7 @@ const UploadRxScreen = ({ navigation }) => {
       // Look up the user's resident_id from the backend
       let residentId = `R-${user.uid.slice(0, 8).toUpperCase()}`;
       try {
-        const userRes = await fetch(`https://api.careconnect.website/api/users/${user.uid}`, {
+        const userRes = await fetch(`${API_BASE}/users/${user.uid}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (userRes.ok) {
@@ -110,7 +111,7 @@ const UploadRxScreen = ({ navigation }) => {
         medications: extractedData.medications || []
       };
 
-      const res = await fetch('https://api.careconnect.website/api/prescriptions', {
+      const res = await fetch(`${API_BASE}/prescriptions`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

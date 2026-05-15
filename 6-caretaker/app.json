@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "6-caretaker",
-    "slug": "6-caretaker",
+    "name": "CareConnect Caretaker",
+    "slug": "careconnect-caretaker",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -21,10 +21,18 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.thusaraka.x6caretaker"
+      "package": "com.careconnect.caretaker"
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "63268a74-6c82-4b12-bfba-f5a64847251d"
+      }
     }
   }
 }

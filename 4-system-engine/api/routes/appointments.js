@@ -43,6 +43,22 @@ router.post('/', async (req, res) => {
       [appointmentId, residentId, residentName || '', doctorName || '', specialization || '', appointmentDate, appointmentTime || '', reason || '']
     );
 
+    // Auto-create notification for the patient
+    try {
+      await pool.execute(
+        `INSERT INTO notifications (resident_id, title, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+        [
+          residentId,
+          `Appointment Booked with Dr. ${doctorName}`,
+          `You have an appointment on ${appointmentDate}${appointmentTime ? ' at ' + appointmentTime : ''}.${specialization ? ' (' + specialization + ')' : ''}${reason ? ' Reason: ' + reason : ''}`,
+          'appointment',
+          appointmentId,
+        ]
+      );
+    } catch (notifErr) {
+      console.warn('[Appointments] Notification insert failed:', notifErr.message);
+    }
+
     res.status(201).json({ message: 'Appointment created', appointmentId });
   } catch (error) {
     console.error('[Appointments] Create error:', error.message);

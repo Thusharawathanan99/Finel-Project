@@ -17,7 +17,10 @@ import json
 import time
 import logging
 import os
+import sys
 import asyncio
+import traceback
+import multiprocessing
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -149,8 +152,15 @@ class DonutModel:
             raise
 
     def _generate_on_device(self, image: Image.Image, active_device: str) -> str:
-        # Preprocess image
+        # Preprocess image — force to RGB JPEG bytes to avoid AVIF/WebP C-level decoder issues
         image = image.convert("RGB")
+
+        # Re-encode through JPEG to avoid problematic image codec crashes
+        jpeg_buffer = io.BytesIO()
+        image.save(jpeg_buffer, format="JPEG", quality=95)
+        jpeg_buffer.seek(0)
+        image = Image.open(jpeg_buffer)
+
         pixel_values = self.processor(
             images=image, return_tensors="pt"
         ).pixel_values.to(active_device)
@@ -161,20 +171,28 @@ class DonutModel:
             task_prompt, add_special_tokens=False, return_tensors="pt"
         ).input_ids.to(active_device)
 
+        # Build attention mask explicitly to prevent the "pad token is same as eos token" crash
+        attention_mask = torch.ones(pixel_values.shape[:2], dtype=torch.long, device=active_device)
+
         # Run generation
         max_length = GPU_MAX_LENGTH if active_device == "cuda" else CPU_MAX_LENGTH
         num_beams = GPU_NUM_BEAMS if active_device == "cuda" else CPU_NUM_BEAMS
 
         with torch.no_grad():
-            generated_ids = self.model.generate(
-                pixel_values,
+            generate_kwargs = dict(
+                pixel_values=pixel_values,
                 decoder_input_ids=decoder_input_ids,
+                attention_mask=attention_mask,
                 max_length=max_length,
                 num_beams=num_beams,
-                early_stopping=True,
                 pad_token_id=self.processor.tokenizer.pad_token_id,
                 eos_token_id=self.processor.tokenizer.eos_token_id,
             )
+            try:
+                generated_ids = self.model.generate(**generate_kwargs)
+            except Exception as gen_error:
+                log.error(f"Generation failed: {gen_error}")
+                raise
 
         generated_text = self.processor.batch_decode(
             generated_ids, skip_special_tokens=True
@@ -506,21 +524,61 @@ async def health_check():
     }
 
 
+def _run_inference_in_subprocess(image_bytes: bytes) -> dict:
+    """
+    Run Donut inference in an isolated subprocess.
+    If the model crashes (segfault, C-level error), only the subprocess dies.
+    The main server stays alive.
+    """
+    try:
+        result = donut.predict(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+        return result
+    except Exception as e:
+        return {
+            "error": str(e),
+            "raw_text": "",
+            "medications": [],
+            "confidence": 0,
+            "model": "donut-prescription-v1",
+            "device": donut.device,
+            "processing_time_ms": 0,
+        }
+
+
 async def _run_inference_with_queue(pil_image: Image.Image) -> dict:
     global active_inferences
 
     try:
-                await asyncio.wait_for(inference_semaphore.acquire(), timeout=INFERENCE_QUEUE_TIMEOUT_SEC)
+        await asyncio.wait_for(inference_semaphore.acquire(), timeout=INFERENCE_QUEUE_TIMEOUT_SEC)
     except TimeoutError:
-                raise HTTPException(
-                        503,
-                        "Server is busy processing other images. Please retry in a few moments."
-                )
+        raise HTTPException(
+            503,
+            "Server is busy processing other images. Please retry in a few moments."
+        )
 
     try:
         async with active_lock:
             active_inferences += 1
-        return await run_in_threadpool(donut.predict, pil_image)
+
+        # Convert image to JPEG bytes for safe cross-boundary passing
+        buf = io.BytesIO()
+        pil_image.save(buf, format="JPEG", quality=95)
+        image_bytes = buf.getvalue()
+
+        # Run in threadpool (model is loaded in this process)
+        result = await run_in_threadpool(donut.predict, Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+        return result
+    except Exception as e:
+        log.error(f"Inference pipeline error: {e}", exc_info=True)
+        return {
+            "error": str(e),
+            "raw_text": "",
+            "medications": [],
+            "confidence": 0,
+            "model": "donut-prescription-v1",
+            "device": donut.device,
+            "processing_time_ms": 0,
+        }
     finally:
         async with active_lock:
             active_inferences = max(0, active_inferences - 1)
@@ -552,14 +610,25 @@ async def predict(image: UploadFile = File(...)):
     log.info(f"📷 Processing image: {image.filename} ({size_mb:.1f}MB)")
 
     try:
-        pil_image = Image.open(io.BytesIO(image_bytes))
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         result = await _run_inference_with_queue(pil_image)
         return JSONResponse(content=result)
     except HTTPException:
         raise
     except Exception as e:
         log.error(f"Inference failed: {e}", exc_info=True)
-        raise HTTPException(500, f"Model inference failed: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Model inference failed: {str(e)}",
+                "raw_text": "",
+                "medications": [],
+                "confidence": 0,
+                "model": "donut-prescription-v1",
+                "device": donut.device,
+                "processing_time_ms": 0,
+            }
+        )
 
 
 @app.post("/api/predict-base64")
@@ -583,14 +652,25 @@ async def predict_base64(payload: dict):
 
     try:
         image_bytes = base64.b64decode(image_data)
-        pil_image = Image.open(io.BytesIO(image_bytes))
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         result = await _run_inference_with_queue(pil_image)
         return JSONResponse(content=result)
     except HTTPException:
         raise
     except Exception as e:
         log.error(f"Base64 inference failed: {e}", exc_info=True)
-        raise HTTPException(500, f"Model inference failed: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Model inference failed: {str(e)}",
+                "raw_text": "",
+                "medications": [],
+                "confidence": 0,
+                "model": "donut-prescription-v1",
+                "device": donut.device,
+                "processing_time_ms": 0,
+            }
+        )
 
 
 @app.get("/api/model-info")

@@ -4,7 +4,7 @@
  */
 import { auth } from './firebase/config';
 
-const API_BASE = 'https://api.careconnect.website/api';
+export const API_BASE = 'https://api.careconnect.website/api';
 
 /**
  * Make an authenticated fetch request to the backend.

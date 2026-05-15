@@ -8,6 +8,7 @@ import PatientListScreen from '../screens/PatientListScreen';
 import PatientProfileScreen from '../screens/PatientProfileScreen';
 import UploadRxScreen from '../screens/UploadRxScreen';
 import LeaveRequestScreen from '../screens/LeaveRequestScreen';
+import WellnessAlertScreen from '../screens/WellnessAlertScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -21,9 +22,11 @@ const AppNavigator = () => {
         <Stack.Screen name="PatientProfile" component={PatientProfileScreen} />
         <Stack.Screen name="UploadRx" component={UploadRxScreen} options={{ presentation: 'modal' }} />
         <Stack.Screen name="LeaveRequest" component={LeaveRequestScreen} options={{ presentation: 'modal' }} />
+        <Stack.Screen name="WellnessAlert" component={WellnessAlertScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
 };
 
 export default AppNavigator;
+

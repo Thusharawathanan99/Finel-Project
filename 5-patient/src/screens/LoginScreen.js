@@ -6,6 +6,7 @@ import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../firebase/config';
 import Button from '../components/Button';
 import Input from '../components/Input';
+import { API_BASE } from '../apiHelper';
 
 const LoginScreen = ({ navigation }) => {
   const [email, setEmail] = useState('');
@@ -23,8 +24,8 @@ const LoginScreen = ({ navigation }) => {
       
       const token = await user.getIdToken();
       
-      // We use the secure Cloudflare tunnel to hit the backend
-      const response = await fetch(`https://api.careconnect.website/api/users/${user.uid}`, {
+      // We use the configured API_BASE to hit the backend
+      const response = await fetch(`${API_BASE}/users/${user.uid}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       
@@ -43,14 +44,14 @@ const LoginScreen = ({ navigation }) => {
         const residentId = `R-${user.uid.slice(0, 8).toUpperCase()}`;
         
         // Create resident record
-        await fetch('https://api.careconnect.website/api/residents', {
+        await fetch(`${API_BASE}/residents`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
           body: JSON.stringify({ residentId, name: user.displayName || email.split('@')[0] }),
         });
         
         // Create user record
-        const createRes = await fetch('https://api.careconnect.website/api/users', {
+        const createRes = await fetch(`${API_BASE}/users`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
           body: JSON.stringify({
