@@ -16,8 +16,6 @@ import { datasetCollector } from './ml/dataset/DatasetCollector';
 import { modelAccuracyTracker } from './ml/ensemble/ModelAccuracyTracker';
 import { clearAllMealPlanCaches } from './ml/meal-plan/MealPlanEngine';
 
-const PatientDashboard = lazy(() => import('./components/PatientDashboard').then(module => ({ default: module.PatientDashboard })));
-const CaretakerDashboard = lazy(() => import('./components/CaretakerDashboard').then(module => ({ default: module.CaretakerDashboard })));
 const AdminDashboard = lazy(() => import('./components/AdminDashboard').then(module => ({ default: module.AdminDashboard })));
 
 type AppScreen = 'welcome' | 'auth' | 'app' | 'loading' | 'error';

@@ -1,0 +1,38 @@
+# CareConnect Production Deployment Configuration
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  api:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  donut:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4096M
+        reservations:
+          cpus: '1.0'
+          memory: 1024M
+
+  frontend:
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+
+  mysql:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1024M

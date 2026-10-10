@@ -217,6 +217,7 @@ function advancedScreenImports(live) {
   return {
     '../components/FacialObservationPanel': { default: 'FacialObservationPanel' },
     '../components/FaceMonitoringGuide': { default: 'FaceMonitoringGuide' },
+    '../components/VocalToneModal': { default: 'VocalToneModal' },
     '../../../shared/facialObservations.js': transpile('shared/facialObservations.js', { './liveFace.js': live }),
     '../../../shared/patientSymptoms.js': transpile('shared/patientSymptoms.js', { './faceCare.js': faceCare }),
     '../../../shared/faceGuide.js': transpile('shared/faceGuide.js', {}),

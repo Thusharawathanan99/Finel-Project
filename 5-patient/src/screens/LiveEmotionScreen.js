@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, Image, TextInput, Share, AppState, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, Image, TextInput, Share, AppState, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -24,6 +24,7 @@ import { getFaceProviderStatusCopy, validateFaceProviderStatus } from '../../../
 import appConfig from '../../app.json';
 import FacialObservationPanel from '../components/FacialObservationPanel';
 import FaceMonitoringGuide from '../components/FaceMonitoringGuide';
+import VocalToneModal from '../components/VocalToneModal';
 import { buildFacialObservationReport } from '../../../shared/facialObservations.js';
 import { buildPatientSymptomReport } from '../../../shared/patientSymptoms.js';
 import { getFaceGuideCopy, getAssistanceWorkflow } from '../../../shared/faceGuide.js';
@@ -86,6 +87,7 @@ const LiveEmotionScreen = ({ navigation }) => {
   const [modelBackend, setModelBackend] = useState(null);
   const [cloudStatus, setCloudStatus] = useState({ configurationState: 'checking' });
   const [detectorMode, setDetectorMode] = useState('auto');
+  const [vocalModalOpen, setVocalModalOpen] = useState(false);
   const bridgeRef = useRef(null);
   const loopRef = useRef(null);
   const cloudSamplerRef = useRef(null);
@@ -733,6 +735,9 @@ const LiveEmotionScreen = ({ navigation }) => {
           <TouchableOpacity style={[styles.secondary, busy && styles.disabled]} onPress={choosePhoto} disabled={Boolean(busy)}>
             <MaterialCommunityIcons name="image-outline" size={22} color="#343078" /><Text style={styles.secondaryText}>{copy.upload}</Text>
           </TouchableOpacity>
+          {!cameraOpen && <TouchableOpacity style={[styles.secondary, { backgroundColor: '#EDE9FE' }]} onPress={() => setVocalModalOpen(true)}>
+            <MaterialCommunityIcons name="microphone" size={22} color="#6D38FF" /><Text style={[styles.secondaryText, { color: '#6D38FF' }]}>Voice Scan</Text>
+          </TouchableOpacity>}
         </View>}
         {!photo && !permission?.granted && <Text style={styles.notice}>{copy.cameraPermission}</Text>}
 
@@ -821,6 +826,13 @@ const LiveEmotionScreen = ({ navigation }) => {
           </>}
         </View>
       </ScrollView>
+      <VocalToneModal 
+        visible={vocalModalOpen} 
+        onClose={() => setVocalModalOpen(false)} 
+        onSaved={() => {
+          Alert.alert('Analysis Saved', 'Your vocal emotion check-in was successfully saved to your records.');
+        }} 
+      />
     </SafeAreaView>
   );
 };

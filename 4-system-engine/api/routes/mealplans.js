@@ -64,7 +64,7 @@ router.post('/generate-meal-plan', async (req, res) => {
   const residentId = body.residentId || req.user?.profile?.resident_id;
   if (!canAccessResident(req, residentId)) return res.status(403).json({ error: 'Select an assigned resident for meal planning' });
   const key = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
   if (!key || !/^[a-z0-9][a-z0-9.-]{1,79}$/i.test(model)) return res.status(503).json({ error: 'Meal generation is unavailable. Ask your care team for a suitable meal plan.', code: 'MEAL_ANALYSIS_UNAVAILABLE' });
   let current;
   try { current = await residentMealContext(residentId, body.inputContext?.calorieTarget ?? body.calorieTarget); }

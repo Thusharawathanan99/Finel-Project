@@ -100,31 +100,7 @@ const MedicationsScreen = ({ navigation }) => {
   };
   const remind=async med=>{try{await remindMedicationCheckin(med.id);Alert.alert('Reminder set','We will ask you to review your medication instructions in 10 minutes.');}catch(error){Alert.alert('Reminder unavailable',error.message);}};
 
-  const handleFinishMed = (med) => {
-    Alert.alert(
-      'Finish Medication',
-      `Mark "${med.drugName}" as permanently finished? This cannot be undone.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Finish', style: 'destructive',
-          onPress: async () => {
-            try {
-              const res = await apiFetch(`/prescriptions/${med.prescriptionId}/medications`, {
-                method: 'DELETE',
-                body: JSON.stringify({ medicationId:Number(med.id), drugName: med.drugName, dosage: med.dosage, frequency: med.frequency }),
-              });
-              if (!res.ok) throw new Error('Failed');
-              Alert.alert('Done', `${med.drugName} marked as finished.`);
-              fetchMedications();
-            } catch (err) {
-              Alert.alert('Error', 'Could not finish medication.');
-            }
-          }
-        }
-      ]
-    );
-  };
+
 
   const checkInMedications = medications.filter(m => !scheduledMedicationIds.has(Number(m.id)));
   const takenCount = checkInMedications.filter(m => takenIds.has(m.id)).length;
@@ -193,7 +169,7 @@ const MedicationsScreen = ({ navigation }) => {
               const timed = scheduledMedicationIds.has(Number(med.id));
               const taken = !timed && takenIds.has(med.id);
               return (
-                <TouchableOpacity key={med.id} style={styles.medCard} onLongPress={() => handleFinishMed(med)} activeOpacity={0.7}>
+                <TouchableOpacity key={med.id} style={styles.medCard} activeOpacity={0.85}>
                   <View style={[styles.iconContainer, taken ? { backgroundColor: '#D1FAE5' } : { backgroundColor: '#EDF2EE' }]}>
                     <MaterialCommunityIcons name="pill" size={28} color={taken ? '#059669' : '#788C82'} />
                   </View>
@@ -208,7 +184,6 @@ const MedicationsScreen = ({ navigation }) => {
                 </TouchableOpacity>
               );
             })}
-            <Text style={styles.hintText}>Long-press a medication to mark it as permanently finished.</Text>
           </View>
         )}
       </ScrollView>

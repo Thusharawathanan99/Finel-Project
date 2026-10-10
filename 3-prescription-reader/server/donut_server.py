@@ -387,6 +387,7 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint for the frontend to verify backend availability."""
@@ -445,7 +446,7 @@ async def _run_inference_with_queue(pil_image: Image.Image) -> dict:
 
 @app.middleware("http")
 async def internal_access(request, call_next):
-    if request.url.path.startswith("/api/predict"):
+    if request.url.path.startswith("/api/predict") or request.url.path.startswith("/predict"):
         supplied = request.headers.get("x-donut-token", "")
         local = request.client and request.client.host in {"127.0.0.1", "::1", "localhost"}
         if (INTERNAL_TOKEN and not hmac.compare_digest(supplied, INTERNAL_TOKEN)) or (not INTERNAL_TOKEN and not local):
@@ -461,6 +462,7 @@ async def internal_access(request, call_next):
     return await call_next(request)
 
 
+@app.post("/predict")
 @app.post("/api/predict")
 async def predict(image: UploadFile = File(...)):
     if not donut.is_ready:
@@ -475,6 +477,7 @@ async def predict(image: UploadFile = File(...)):
     return JSONResponse(content=await _run_inference_with_queue(pil_image))
 
 
+@app.post("/predict-base64")
 @app.post("/api/predict-base64")
 async def predict_base64(payload: dict):
     if not donut.is_ready:

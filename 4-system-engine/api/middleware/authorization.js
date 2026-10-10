@@ -97,7 +97,10 @@ export async function authorizationMiddleware(req, res, next) {
 
     if (path === '/sos-alerts') {
       if (method === 'GET') return next(); // Listing is scoped below in its router.
-      if (method === 'POST') return resident(req.body?.residentId);
+      if (method === 'POST') {
+        if (!req.body?.residentId && careStaff) return next();
+        return resident(req.body?.residentId);
+      }
     }
     if(path==='/sos-alerts/stream')return method==='GET'&&careStaff?next():denied();
     match = matchPath(/^\/sos-alerts\/([^/]+)\/resolve$/);

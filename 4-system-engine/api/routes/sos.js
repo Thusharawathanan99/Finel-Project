@@ -18,27 +18,36 @@ router.post('/sos-alerts', async (req, res) => {
   try {
     if (!registered(req)) return res.status(401).json({ error: 'Authentication required' });
     const { residentId, message, requestId } = req.body || {};
-    if (!validText(residentId, 50) || !validText(message, 5000, true)) return res.status(400).json({ error: 'Provide a valid resident and optional message' });
+    const isStaff = ['caretaker', 'admin'].includes(req.user?.role);
+    if (!residentId && !isStaff) return res.status(400).json({ error: 'Provide a valid resident and optional message' });
+    if (residentId && !validText(residentId, 50)) return res.status(400).json({ error: 'Provide a valid resident' });
+    if (!validText(message, 5000, true)) return res.status(400).json({ error: 'Provide an optional message under 5000 characters' });
     if (requestId !== undefined && !requestUUID(requestId)) return res.status(400).json({ error: 'Provide a valid request UUID', errorCode: 'INVALID_REQUEST_ID' });
-    if (!canAccessResident(req, residentId)) return res.status(403).json({ error: 'You do not have permission to request help for this resident' });
+    if (residentId && !canAccessResident(req, residentId)) return res.status(403).json({ error: 'You do not have permission to request help for this resident' });
     const key = requestId?.toLowerCase() || null;
-    const text = message?.trim() || 'Urgent help requested by the resident or care team';
-    const hash = createHash('sha256').update(canonicalJSON({ residentId, message: text })).digest('hex');
+    const text = message?.trim() || (residentId ? 'Urgent help requested by the resident or care team' : 'Emergency Panic Alert broadcast by staff');
+    const hash = createHash('sha256').update(canonicalJSON({ residentId: residentId || null, message: text })).digest('hex');
     connection = await pool.getConnection(); await connection.beginTransaction();
-    // Lock an existing resident row, including the first SOS with no alert row yet.
-    const [rows] = await connection.execute('SELECT name FROM residents WHERE resident_id = ? FOR UPDATE', [residentId]);
-    if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: 'Resident not found' }); }
+
+    let residentName = 'Facility Alert';
+    if (residentId) {
+      // Lock an existing resident row, including the first SOS with no alert row yet.
+      const [rows] = await connection.execute('SELECT name FROM residents WHERE resident_id = ? FOR UPDATE', [residentId]);
+      if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: 'Resident not found' }); }
+      residentName = rows[0].name;
+    }
+
     if (key) {
       const [prior] = await connection.execute('SELECT id, resident_id, resident_name, request_hash, is_resolved FROM sos_alerts WHERE requested_by_uid = ? AND request_id = ? LIMIT 1 FOR UPDATE', [req.user.uid, key]);
       if (prior.length) {
-        if (prior[0].resident_id !== residentId || prior[0].request_hash !== hash) {
+        if (prior[0].resident_id !== (residentId || null) || prior[0].request_hash !== hash) {
           await connection.rollback();
           return res.status(409).json({ error: 'This request ID was already used for different help details', errorCode: 'REQUEST_CONFLICT' });
         }
         await connection.commit();
         return res.json({ ...receipt(prior[0], true), message: 'Help request was already saved' });
       }
-    } else {
+    } else if (residentId) {
       // Preserve legacy cooldown behavior; keyed requests preserve every new report's actual details.
       const [recent] = await connection.execute(`SELECT id, resident_name, is_resolved FROM sos_alerts WHERE resident_id = ? AND is_resolved = FALSE AND created_at > DATE_SUB(NOW(), INTERVAL 30 SECOND) ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [residentId]);
       if (recent.length) {
@@ -46,10 +55,10 @@ router.post('/sos-alerts', async (req, res) => {
         return res.json({ ...receipt(recent[0], true), message: 'SOS alert already active', cooldown: true });
       }
     }
-    const [result] = await connection.execute('INSERT INTO sos_alerts (resident_id, resident_name, message, requested_by_uid, request_id, request_hash) VALUES (?, ?, ?, ?, ?, ?)', [residentId, rows[0].name, text, req.user.uid, key, hash]);
+    const [result] = await connection.execute('INSERT INTO sos_alerts (resident_id, resident_name, message, requested_by_uid, request_id, request_hash) VALUES (?, ?, ?, ?, ?, ?)', [residentId || null, residentName, text, req.user.uid, key, hash]);
     await connection.commit();
-    sosChanges.emit('change');void publishCareUpdate('emergency',residentId);
-    return res.status(201).json({ ...receipt({ id: result.insertId, resident_name: rows[0].name, is_resolved: false }, false), message: 'Help request saved to the care dashboard' });
+    sosChanges.emit('change');void publishCareUpdate('emergency',residentId || 'facility');
+    return res.status(201).json({ ...receipt({ id: result.insertId, resident_name: residentName, is_resolved: false }, false), message: 'Help request saved to the care dashboard' });
   } catch (error) {
     if (connection) await connection.rollback().catch(() => {});
     if (error.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'This request ID was already used. Retry its original details.', errorCode: 'REQUEST_CONFLICT' });

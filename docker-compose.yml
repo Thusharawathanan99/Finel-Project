@@ -75,7 +75,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-careconnect}
       FIREBASE_SERVICE_ACCOUNT_KEY: /run/secrets/firebase_service_account
       GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
       GOOGLE_CLOUD_PROJECT_ID: ${GOOGLE_CLOUD_PROJECT_ID:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
       CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS to the deployed web origin(s)}
@@ -121,11 +121,25 @@ services:
       DONUT_INTERNAL_TOKEN: ${DONUT_INTERNAL_TOKEN:?Set a private token for the internal prescription service}
     networks:
       - careconnect_net
-    # GPU support — uncomment if you have an NVIDIA GPU + nvidia-container-toolkit
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── 4. Admin Web App Frontend ─────────────────
+  frontend:
+    build:
+      context: ./1-ui-ux
+      dockerfile: Dockerfile
+    container_name: careconnect_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      VITE_API_BASE_URL: http://api:3001
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - careconnect_net

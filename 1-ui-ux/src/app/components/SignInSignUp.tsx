@@ -104,6 +104,32 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
     }
   };
 
+  const handleQuickLaunchAdmin = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const appUser = await signIn('admin@careconnect.com', 'admin123');
+      const user: User = {
+        userId: appUser.uid,
+        name: appUser.name || 'Facility Administrator',
+        email: appUser.email,
+        role: 'admin',
+        residentId: appUser.residentId,
+      };
+      await onComplete(user);
+    } catch (err: any) {
+      console.warn('[QuickLaunch] Admin sign-in fallback to local demo user:', err);
+      await onComplete({
+        userId: 'DEMO',
+        name: 'Facility Administrator',
+        email: 'admin@careconnect.com',
+        role: 'admin',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handlePasswordReset = async () => {
     setError('');
     setNotice('');
@@ -410,12 +436,7 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             <div className="mt-4 pt-4 border-t border-gray-100 text-center">
               <button
                 type="button"
-                onClick={() => onComplete({
-                  userId: 'DEMO',
-                  name: 'Facility Administrator',
-                  email: 'admin@careconnect.com',
-                  role: 'admin',
-                })}
+                onClick={handleQuickLaunchAdmin}
                 className="w-full py-2.5 px-4 bg-teal-50 text-teal-800 hover:bg-teal-100 border border-teal-200 rounded-xl font-medium text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
               >
                 <Shield className="w-4 h-4 text-teal-700" />

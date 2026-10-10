@@ -203,6 +203,27 @@ CREATE TABLE IF NOT EXISTS emergency_alerts (
 );
 
 -- ──────────────────────────────────────────────
+-- SOS Alerts (Real-time Panic and Emergency Alerts)
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sos_alerts (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) DEFAULT NULL,
+  resident_name VARCHAR(255) DEFAULT NULL,
+  message TEXT NOT NULL,
+  requested_by_uid VARCHAR(128) DEFAULT NULL,
+  request_id VARCHAR(80) DEFAULT NULL,
+  request_hash CHAR(64) DEFAULT NULL,
+  is_resolved BOOLEAN DEFAULT FALSE,
+  resolved_by VARCHAR(255) DEFAULT NULL,
+  resolved_by_uid VARCHAR(128) DEFAULT NULL,
+  resolved_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE SET NULL,
+  INDEX idx_sos_resident (resident_id),
+  INDEX idx_sos_resolved (is_resolved, created_at)
+);
+
+-- ──────────────────────────────────────────────
 -- System Components (ML engine status)
 -- ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS system_components (

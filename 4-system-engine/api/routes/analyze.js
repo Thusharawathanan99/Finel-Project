@@ -27,7 +27,7 @@ if (serverApiKey) {
 
 const DONUT_BASE = process.env.DONUT_API_URL || 'http://localhost:8000';
 const DONUT_URL = DONUT_BASE.replace(/\/$/, '') + '/api/predict-base64';
-const DONUT_TIMEOUT_MS = Number(process.env.DONUT_TIMEOUT_MS || 800);
+const DONUT_TIMEOUT_MS = Number(process.env.DONUT_TIMEOUT_MS || 25000);
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 15000);
 
 function candidateFromMedication(m, source, fallbackConfidence = 0.5) {
@@ -136,7 +136,7 @@ router.post('/analyze-prescription', async (req, res) => {
       const t0 = Date.now();
       try {
         // Use donut raw text for regex parsing (if available)
-        const textToParse = donutRawText;
+        const textToParse = donutRawText || req.body?.text || req.body?.raw_text || req.body?.ocr_text || '';
         if (!textToParse || textToParse.trim().length < 5) {
           timings.regexMs = Date.now() - t0;
           return { donutCandidates, regexCandidates: [] };

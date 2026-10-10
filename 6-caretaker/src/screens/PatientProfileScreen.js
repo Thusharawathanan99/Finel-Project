@@ -261,6 +261,12 @@ const PatientProfileScreen = ({ route, navigation }) => {
             <Text style={[styles.tabText, activeTab === 'history' && styles.tabTextActive]}>History ({residentDetails?.finishedMedications?.length || 0})</Text>
           </TouchableOpacity>
           <TouchableOpacity 
+            style={[styles.tab, activeTab === 'appts' && styles.tabActive]}
+            onPress={() => setActiveTab('appts')}
+          >
+            <Text style={[styles.tabText, activeTab === 'appts' && styles.tabTextActive]}>Appointments ({appointments.length})</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
             style={[styles.tab, activeTab === 'diet' && styles.tabActive]}
             onPress={() => setActiveTab('diet')}
           >
