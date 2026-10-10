@@ -1,88 +1,24 @@
 // Emotional States API routes
 import { Router } from 'express';
 import pool from '../db.js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createFaceVisionHandler } from './faceVision.js';
+import { createFaceVisionStatusHandler } from './faceVisionStatus.js';
+import { validateObservation, persistObservation } from './wellnessPersistence.js';
+import { publishEmotionObservation } from '../realtimeCare.js';
 
 const router = Router();
 
-// Configure Gemini
-let genAI = null;
-if (process.env.VITE_GEMINI_API_KEY) {
-  genAI = new GoogleGenerativeAI(process.env.VITE_GEMINI_API_KEY);
-  console.log('✅ Gemini API initialized for emotion analysis');
-} else {
-  console.warn('⚠️  VITE_GEMINI_API_KEY not set — Gemini will be unavailable for emotion analysis');
-}
+// Authenticated, quota-limited descriptive face detection; never writes wellness data.
+router.post('/emotions/analyze-image', createFaceVisionHandler());
 
-// POST /api/emotions/analyze-image — Analyze facial expression for health/wellness context
-router.post('/emotions/analyze-image', async (req, res) => {
-  try {
-    const { image } = req.body;
-    if (!image) {
-      return res.status(400).json({ error: 'Image base64 data is required' });
-    }
-    if (!genAI) {
-      return res.status(503).json({ error: 'AI analysis service is unavailable — VITE_GEMINI_API_KEY not set' });
-    }
-
-    console.log('[Emotions] 🚀 Analyzing image for health/wellness indicators...');
-
-    let cleanBase64 = image;
-    const dataUrlMatch = image.match(/^data:([^;]+);base64,(.+)$/);
-    if (dataUrlMatch) {
-      cleanBase64 = dataUrlMatch[2];
-    } else {
-      cleanBase64 = image.replace(/^data:[^;]+;base64,/, '');
-    }
-
-    console.log(`[Emotions]   Base64 length: ${cleanBase64.length} chars`);
-
-    // Use the model from env or fall back to gemini-2.5-flash
-    const modelName = (process.env.VITE_GEMINI_MODELS || 'gemini-2.5-flash').split(',')[0].trim();
-    console.log(`[Emotions]   Using model: ${modelName}`);
-    const model = genAI.getGenerativeModel({ model: modelName });
-    
-    const prompt = `You are an AI assistant for a health monitoring system. 
-Analyze this patient's facial expression and provide a wellness assessment. Look for signs of distress, fatigue, pain, or well-being.
-Return ONLY a raw JSON object (no markdown, no backticks) with the following structure:
-{
-  "emotionLabel": "string (e.g., Stable, Fatigued, Distressed, Content, Anxious)",
-  "stateScore": number (0-100, where 100 is perfectly well/positive and 0 is severe distress/pain),
-  "category": "string (either 'positive', 'neutral', 'negative', or 'side-effect')",
-  "note": "A short clinical observation sentence (e.g., 'Patient appears rested and calm.')"
-}`;
-
-    const parts = [
-      { text: prompt },
-      { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } }
-    ];
-
-    const result = await model.generateContent(parts);
-    const text = result.response.text();
-    console.log(`[Emotions]   AI response length: ${text.length} chars`);
-    
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    
-    if (!jsonMatch) {
-      console.error('[Emotions]   Failed to parse JSON. Raw response:', text.substring(0, 500));
-      throw new Error("Failed to parse JSON from AI response");
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    console.log(`[Emotions]   ✅ Result: ${parsed.emotionLabel} (${parsed.stateScore}/100)`);
-    res.json(parsed);
-
-  } catch (error) {
-    console.error('[Emotions] Analysis error:', error.message);
-    console.error('[Emotions] Full error:', error.toString());
-    res.status(500).json({ error: error.message });
-  }
-});
+// Registered-account setup metadata only; does not consume inference quota or
+// establish that the provider is reachable or has analyzed an image.
+router.get('/emotions/face-status', createFaceVisionStatusHandler());
 
 // GET /api/residents/:residentId/emotions — Get emotional state history
 router.get('/residents/:residentId/emotions', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const [rows] = await pool.execute(
       'SELECT * FROM emotional_states WHERE resident_id = ? ORDER BY recorded_at DESC LIMIT ?',
       [req.params.residentId, limit]
@@ -96,45 +32,20 @@ router.get('/residents/:residentId/emotions', async (req, res) => {
 
 // POST /api/emotions — Record a new emotional state
 router.post('/emotions', async (req, res) => {
+  const invalid = validateObservation(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
   try {
-    const { residentId, stateScore, emotionLabel, category, relatedMedicine, note } = req.body;
-
-    if (!residentId || stateScore === undefined) {
-      return res.status(400).json({ error: 'residentId and stateScore are required' });
+    const result = await persistObservation(pool, req.body, true);
+    if (result.status < 300) {
+      const realtime = await publishEmotionObservation(req, result, { ...req.body,
+        provenance: req.body.source || 'self-report', reviewRequired: req.body.source === 'experimental-assessment' });
+      result.realtimePublished = realtime.published;
+      result.realtimePending = !realtime.published;
     }
-
-    if (stateScore < 0 || stateScore > 100) {
-      return res.status(400).json({ error: 'stateScore must be between 0 and 100' });
-    }
-
-    // Try inserting with extended columns first
-    let result;
-    try {
-      [result] = await pool.execute(
-        'INSERT INTO emotional_states (resident_id, state_score, emotion_label, category, related_medicine, note) VALUES (?, ?, ?, ?, ?, ?)',
-        [residentId, stateScore, emotionLabel || null, category || null, relatedMedicine || null, note || null]
-      );
-    } catch (colErr) {
-      // If the extra columns don't exist yet, fall back to basic insert
-      console.warn('[Emotions] Extended columns not available, using basic insert:', colErr.message);
-      [result] = await pool.execute(
-        'INSERT INTO emotional_states (resident_id, state_score) VALUES (?, ?)',
-        [residentId, stateScore]
-      );
-    }
-
-    res.status(201).json({
-      message: 'Emotional state recorded',
-      id: result.insertId,
-      residentId,
-      stateScore,
-      emotionLabel: emotionLabel || null,
-      category: category || null,
-      relatedMedicine: relatedMedicine || null,
-    });
+    return res.status(result.status).json(result);
   } catch (error) {
     console.error('[Emotions] Record error:', error.message);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'The observation and alert could not be saved. Please retry.' });
   }
 });
 
@@ -157,76 +68,29 @@ async function resolveCaretakerId(id) {
 
 // POST /api/emotions/wellness-alert — Create a wellness alert for assigned caretakers
 router.post('/emotions/wellness-alert', async (req, res) => {
+  const invalid = validateObservation(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
   try {
-    const { residentId, residentName, emotionLabel, stateScore, category, note } = req.body;
-
-    if (!residentId || stateScore === undefined) {
-      return res.status(400).json({ error: 'residentId and stateScore are required' });
-    }
-
-    // Determine severity
-    let severity = 'info';
-    if (stateScore <= 30) severity = 'critical';
-    else if (stateScore <= 50) severity = 'warning';
-
-    // Only create alert if warning or critical
-    if (severity === 'info') {
-      return res.json({ message: 'Patient condition is stable, no alert created', severity });
-    }
-
-    // Check for recent duplicate (avoid spamming — 2 min cooldown per resident)
-    const [recent] = await pool.execute(
-      `SELECT id FROM wellness_alerts 
-       WHERE resident_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 2 MINUTE) 
-       ORDER BY created_at DESC LIMIT 1`,
-      [residentId]
-    );
-
-    if (recent.length > 0) {
-      return res.json({ message: 'Alert cooldown active, skipped', severity, cooldown: true });
-    }
-
-    // Resolve resident name if not provided
-    let name = residentName;
-    if (!name) {
-      const [rRows] = await pool.execute('SELECT name FROM residents WHERE resident_id = ?', [residentId]);
-      name = rRows.length > 0 ? rRows[0].name : 'Unknown Patient';
-    }
-
-    const [result] = await pool.execute(
-      `INSERT INTO wellness_alerts (resident_id, resident_name, emotion_label, state_score, category, note, severity) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [residentId, name, emotionLabel || null, stateScore, category || null, note || null, severity]
-    );
-
-    console.log(`[Wellness] 🚨 ${severity.toUpperCase()} alert created for ${name} (score: ${stateScore})`);
-
-    // Also save to emotional_states for history
-    try {
-      await pool.execute(
-        'INSERT INTO emotional_states (resident_id, state_score, emotion_label, category, note) VALUES (?, ?, ?, ?, ?)',
-        [residentId, stateScore, emotionLabel || null, category || null, note || null]
-      );
-    } catch (e) {
-      console.warn('[Wellness] Could not save emotional state:', e.message);
-    }
-
-    res.status(201).json({ 
-      message: 'Wellness alert created', 
-      alertId: result.insertId, 
-      severity,
-      residentName: name
-    });
+    // Compatibility endpoint: observations are recorded once through POST /emotions.
+    const result = await persistObservation(pool, req.body, false);
+    return res.status(result.status).json(result);
   } catch (error) {
     console.error('[Wellness] Create alert error:', error.message);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'The wellness alert could not be saved. Please retry.' });
   }
 });
 
 // GET /api/emotions/wellness-alerts/:caretakerId — Get alerts for a caretaker's assigned patients
+router.get('/emotions/wellness-alerts', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Administrator access required' });
+    const [rows] = await pool.execute("SELECT * FROM wellness_alerts WHERE acknowledged = FALSE ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, created_at DESC LIMIT 200");
+    return res.json(rows);
+  } catch { return res.status(500).json({ error: 'Wellness alerts could not be retrieved' }); }
+});
 router.get('/emotions/wellness-alerts/:caretakerId', async (req, res) => {
   try {
-    const caretakerId = await resolveCaretakerId(req.params.caretakerId);
+    const caretakerId = req.authorizedCaretakerId || await resolveCaretakerId(req.params.caretakerId);
     if (!caretakerId) {
       return res.status(404).json({ error: 'Caretaker not found' });
     }
@@ -248,7 +112,7 @@ router.get('/emotions/wellness-alerts/:caretakerId', async (req, res) => {
     const [alerts] = await pool.execute(
       `SELECT * FROM wellness_alerts 
        WHERE resident_id IN (${placeholders}) 
-         AND created_at > DATE_SUB(NOW(), INTERVAL 24 HOUR)
+         AND acknowledged = FALSE
        ORDER BY 
          CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
          created_at DESC
@@ -266,11 +130,11 @@ router.get('/emotions/wellness-alerts/:caretakerId', async (req, res) => {
 // PUT /api/emotions/wellness-alerts/:id/acknowledge — Acknowledge an alert
 router.put('/emotions/wellness-alerts/:id/acknowledge', async (req, res) => {
   try {
-    const { acknowledgedBy } = req.body;
+    const acknowledgedBy = req.user.profile?.name || req.user.email || req.user.uid;
 
     await pool.execute(
-      `UPDATE wellness_alerts SET acknowledged = TRUE, acknowledged_by = ?, acknowledged_at = NOW() WHERE id = ?`,
-      [acknowledgedBy || 'Caretaker', req.params.id]
+      `UPDATE wellness_alerts SET acknowledged = TRUE, acknowledged_by = ?, acknowledged_by_uid = ?, acknowledged_at = NOW() WHERE id = ?`,
+      [acknowledgedBy, req.user.uid, req.params.id]
     );
 
     res.json({ message: 'Alert acknowledged' });

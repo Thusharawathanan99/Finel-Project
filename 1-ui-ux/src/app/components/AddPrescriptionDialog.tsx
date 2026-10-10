@@ -26,7 +26,7 @@ export function AddPrescriptionDialog({ residentName, onProcess, onClose }: AddP
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
         <div className="flex items-center justify-between p-4 border-b">
           <h3 className="font-semibold">Add Prescription - {residentName}</h3>
@@ -46,7 +46,7 @@ export function AddPrescriptionDialog({ residentName, onProcess, onClose }: AddP
               value={doctorName}
               onChange={(e) => setDoctorName(e.target.value)}
               placeholder="Enter prescribing doctor's name"
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
               required
             />
           </div>
@@ -59,10 +59,10 @@ export function AddPrescriptionDialog({ residentName, onProcess, onClose }: AddP
             </p>
           </div>
 
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+          <div className="bg-teal-50 border border-teal-200 rounded-lg p-3">
             <div className="flex items-start gap-2">
-              <Sparkles className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-blue-900">
+              <Sparkles className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-teal-900">
                 The system will use OCR to extract text from the prescription image, 
                 then NLP to parse medication details automatically.
               </p>
@@ -80,7 +80,7 @@ export function AddPrescriptionDialog({ residentName, onProcess, onClose }: AddP
             <button
               type="submit"
               disabled={processing}
-              className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {processing ? 'Processing...' : 'Process Prescription'}
             </button>

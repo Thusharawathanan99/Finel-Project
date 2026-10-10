@@ -1,11 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Dashboard } from '../models/Dashboard';
 import { User } from '../models/User';
 import { Resident, PersonalDetails } from '../models/Resident';
 import { Caretaker } from '../models/Caretaker';
 import { SystemComponent, SystemStatus } from '../models/SystemComponent';
-import { createCaretakerAccount } from '../services/firebaseAuthService';
-import { caretakersApi, doctorsApi, sosApi, complaintsApi } from '../services/apiService';
+import { createCaretakerAccount, getCaretakerPasswordValidationError as getPasswordValidationError } from '../services/firebaseAuthService';
+import { caretakersApi, sosApi, residentsApi, systemApi } from '../services/apiService';
+import { PersistedCareAlerts } from './PersistedCareAlerts';
+import { MonitoringDevices } from './monitoring/MonitoringDevices';
+import { MonitoringIncidents } from './monitoring/MonitoringIncidents';
+import { MonitoringConsentPanel } from './monitoring/MonitoringConsentPanel';
+import { CareRecordPanel } from './monitoring/CareRecordPanel';
+import { MonitoringReports } from './monitoring/MonitoringReports';
+import { subscribeSosAlerts } from '../services/sosRealtime';
 import { 
   Shield, 
   Users, 
@@ -18,12 +25,8 @@ import {
   AlertTriangle,
   UserPlus,
   Trash2,
-  Stethoscope,
-  Pencil,
-  MessageSquare,
-  Send,
-  CheckCircle,
-  Eye
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -34,29 +37,36 @@ interface AdminDashboardProps {
 }
 
 export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDashboardProps) {
-  const [activeView, setActiveView] = useState<'overview' | 'residents' | 'caretakers' | 'leave' | 'systems' | 'doctors' | 'complaints'>('overview');
+  const [activeView, setActiveView] = useState<'overview' | 'residents' | 'caretakers' | 'leave' | 'systems'>('overview');
   const [showAddResident, setShowAddResident] = useState(false);
   const [showAddCaretaker, setShowAddCaretaker] = useState(false);
   const [showAddSystem, setShowAddSystem] = useState(false);
-  const [showAddDoctor, setShowAddDoctor] = useState(false);
   const [selectedLeaveRequest, setSelectedLeaveRequest] = useState<any>(null);
-  const [doctors, setDoctors] = useState<any[]>([]);
-  const [doctorForm, setDoctorForm] = useState({ name: '', specialization: '', phone: '', email: '', hospital: '' });
-  const [editingDoctorId, setEditingDoctorId] = useState<number | null>(null);
   const [sosAlerts, setSosAlerts] = useState<any[]>([]);
-  const [complaints, setComplaints] = useState<any[]>([]);
-  const [respondingTo, setRespondingTo] = useState<number | null>(null);
-  const [responseText, setResponseText] = useState('');
+  const [operationError, setOperationError] = useState('');
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const changeInProgress = useRef(false);
+
+  const runChange = async (action: string, change: () => Promise<void>) => {
+    if (changeInProgress.current) return;
+    changeInProgress.current = true;
+    setPendingAction(action);
+    setOperationError('');
+    try {
+      await change();
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Change could not be saved. Please try again.');
+    } finally {
+      changeInProgress.current = false;
+      setPendingAction(null);
+    }
+  };
 
   const emergencyAlerts = dashboard.getActiveEmergencyAlerts();
   const criticalAlerts = dashboard.getCriticalAlerts();
   const pendingLeaveRequests = dashboard.getPendingLeaveRequests();
-  const avgWellness = Math.round(
-    dashboard.residents.reduce((sum, r) => {
-      const latest = r.getLatestEmotionalState();
-      return sum + (latest?.stateScore || 0);
-    }, 0) / (dashboard.residents.length || 1)
-  );
+  const measuredScores=dashboard.residents.map(resident=>resident.getLatestEmotionalState()?.stateScore).filter((score):score is number=>typeof score==='number'&&Number.isFinite(score));
+  const avgWellness = measuredScores.length ? Math.round(measuredScores.reduce((sum,score)=>sum+score,0)/measuredScores.length) : '--';
 
   const [residentForm, setResidentForm] = useState<{
     name: string;
@@ -102,146 +112,61 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
   });
 
   const [replacementCaretaker, setReplacementCaretaker] = useState('');
+  const [loadErrors, setLoadErrors] = useState<Record<string,string>>({});
+  const [showCaretakerPassword, setShowCaretakerPassword] = useState(false);
+  const recordsActive = useRef(true);
+  const refreshRecords = async () => {
+    const feeds = [{key:'emergencies',fetch:sosApi.getActive,publish:setSosAlerts}];
+    await Promise.all(feeds.map(async feed => {
+      try { const rows=await feed.fetch(); if (recordsActive.current) { feed.publish(rows); setLoadErrors(previous=>({...previous,[feed.key]:''})); } }
+      catch (error) { if(recordsActive.current) setLoadErrors(previous=>({...previous,[feed.key]:error instanceof Error ? error.message : 'Could not load records.'})); }
+    }));
+  };
 
-  // Fetch doctors on mount
+  // Refresh independent feeds; a failed feed retains its last successful records.
+  useEffect(() => subscribeSosAlerts(setSosAlerts, message => setLoadErrors(previous => ({ ...previous, liveEmergencies: message }))), [user.userId]);
   useEffect(() => {
-    doctorsApi.getAll().then(setDoctors).catch(() => {});
-  }, []);
-
-  // Poll SOS alerts every 10 seconds
-  useEffect(() => {
-    const fetchSOS = () => sosApi.getActive().then(setSosAlerts).catch(() => {});
-    fetchSOS();
-    const interval = setInterval(fetchSOS, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Fetch complaints
-  useEffect(() => {
-    complaintsApi.getAll().then(setComplaints).catch(() => {});
+    recordsActive.current = true;
+    void refreshRecords();
+    const refresh = () => { if(document.visibilityState==='visible') void refreshRecords(); };
+    const interval=setInterval(refresh,10000);
+    window.addEventListener('focus',refresh);
+    document.addEventListener('visibilitychange',refresh);
+    return ()=>{recordsActive.current=false;clearInterval(interval);window.removeEventListener('focus',refresh);document.removeEventListener('visibilitychange',refresh);};
   }, []);
 
   const handleResolveSOS = async (alertId: number) => {
+    if(changeInProgress.current)return;changeInProgress.current=true;setPendingAction('sos');
     try {
       await sosApi.resolve(alertId, user.name);
       setSosAlerts(prev => prev.filter(a => a.id !== alertId));
     } catch (err) {
-      alert('Failed to resolve SOS alert.');
-    }
+      setOperationError('Failed to resolve SOS alert. Please retry.');
+    } finally {changeInProgress.current=false;setPendingAction(null);}
   };
 
-  const handleRespondComplaint = async (complaintId: number) => {
-    if (!responseText.trim()) return;
-    try {
-      await complaintsApi.respond(complaintId, {
-        status: 'reviewed',
-        adminResponse: responseText.trim(),
-        respondedBy: user.name,
-      });
-      const updated = await complaintsApi.getAll();
-      setComplaints(updated);
-      setRespondingTo(null);
-      setResponseText('');
-    } catch (err) {
-      alert('Failed to respond to complaint.');
-    }
-  };
-
-  const handleResolveComplaint = async (complaintId: number) => {
-    try {
-      await complaintsApi.respond(complaintId, {
-        status: 'resolved',
-        respondedBy: user.name,
-      });
-      const updated = await complaintsApi.getAll();
-      setComplaints(updated);
-    } catch (err) {
-      alert('Failed to resolve complaint.');
-    }
-  };
-
-  const handleAddDoctor = async () => {
-    if (!doctorForm.name) return;
-    try {
-      if (editingDoctorId) {
-        await doctorsApi.update(editingDoctorId, doctorForm);
-      } else {
-        await doctorsApi.create(doctorForm);
-      }
-      const updated = await doctorsApi.getAll();
-      setDoctors(updated);
-      setDoctorForm({ name: '', specialization: '', phone: '', email: '', hospital: '' });
-      setEditingDoctorId(null);
-      setShowAddDoctor(false);
-    } catch (err) {
-      alert('Failed to save doctor.');
-    }
-  };
-
-  const openEditDoctor = (doc: any) => {
-    setDoctorForm({
-      name: doc.name || '',
-      specialization: doc.specialization || '',
-      phone: doc.phone || '',
-      email: doc.email || '',
-      hospital: doc.hospital || '',
-    });
-    setEditingDoctorId(doc.doctor_id);
-    setShowAddDoctor(true);
-  };
-
-  const openAddDoctor = () => {
-    setDoctorForm({ name: '', specialization: '', phone: '', email: '', hospital: '' });
-    setEditingDoctorId(null);
-    setShowAddDoctor(true);
-  };
-
-  const handleRemoveDoctor = async (id: number) => {
-    if (!confirm('Remove this doctor?')) return;
-    try {
-      await doctorsApi.delete(id);
-      setDoctors(prev => prev.filter(d => d.doctor_id !== id));
-    } catch (err) {
-      alert('Failed to remove doctor.');
-    }
-  };
-
-  const handleAddResident = () => {
-    const resident = new Resident(
-      `R${Date.now()}`,
-      residentForm.name,
-      parseInt(residentForm.age)
-    );
-    
-    const details: PersonalDetails = {
-      roomNumber: residentForm.roomNumber,
-      floorNumber: residentForm.floorNumber,
-      address: residentForm.address,
-      city: residentForm.city,
-      state: residentForm.state,
-      zipCode: residentForm.zipCode,
-      emergencyContactName: residentForm.emergencyContactName,
-      emergencyContactPhone: residentForm.emergencyContactPhone,
-      emergencyContactRelation: residentForm.emergencyContactRelation,
-      admissionDate: new Date()
-    };
-    
-    resident.updatePersonalDetails(details);
+  const handleAddResident = () => runChange('resident', async () => {
+    if (!residentForm.name.trim() || !residentForm.age.trim() || !Number.isInteger(Number(residentForm.age)) || Number(residentForm.age) < 0 || Number(residentForm.age) > 120) throw new Error('Enter a name and a whole-number age between 0 and 120.');
+    const age = Number(residentForm.age);
+    const admissionDate = new Date().toISOString().split('T')[0];
+    const response = await residentsApi.create({ ...residentForm, name: residentForm.name.trim(), age, admissionDate });
+    const resident = new Resident(response.residentId, residentForm.name.trim(), age);
+    resident.updatePersonalDetails({ ...residentForm, admissionDate: new Date(`${admissionDate}T00:00:00`) });
     dashboard.addResident(resident);
     setShowAddResident(false);
-    setResidentForm({
-      name: '', age: '', roomNumber: '', floorNumber: '', address: '', city: '',
-      state: '', zipCode: '', emergencyContactName: '', emergencyContactPhone: '',
-      emergencyContactRelation: ''
-    });
+    setResidentForm({ name: '', age: '', roomNumber: '', floorNumber: '', address: '', city: '', state: '', zipCode: '', emergencyContactName: '', emergencyContactPhone: '', emergencyContactRelation: '' });
     onRefresh();
-  };
+  });
 
   const handleRemoveResident = (residentId: string) => {
-    if (confirm('Are you sure you want to remove this resident?')) {
+    if (!confirm('Are you sure you want to remove this resident?')) return;
+    void runChange(`resident:${residentId}`, async () => {
+      await residentsApi.delete(residentId);
       dashboard.removeResident(residentId);
+      dashboard.caretakers.forEach(c => { c.assignedResidents = c.assignedResidents.filter(id => id !== residentId); });
+      dashboard.appointments = dashboard.appointments.filter(a => a.residentId !== residentId);
       onRefresh();
-    }
+    });
   };
 
   const closeCaretakerModal = () => {
@@ -249,15 +174,18 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     setCaretakerForm({ name: '', email: '', password: '', phone: '', specialization: '' });
     setCaretakerFormError('');
     setCaretakerSubmitting(false);
+    setShowCaretakerPassword(false);
   };
 
   const handleAddCaretaker = async () => {
     setCaretakerFormError('');
 
-    if (caretakerForm.password.length < 6) {
-      setCaretakerFormError('Password must be at least 6 characters.');
+    const passwordError = getPasswordValidationError(caretakerForm.password);
+    if (passwordError) {
+      setCaretakerFormError(passwordError);
       return;
     }
+    if(changeInProgress.current)return;changeInProgress.current=true;setPendingAction('caretaker-create');
 
     setCaretakerSubmitting(true);
 
@@ -283,6 +211,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     } catch (error: any) {
       setCaretakerFormError(error?.message || 'Failed to create caretaker account.');
     } finally {
+      changeInProgress.current=false;setPendingAction(null);
       setCaretakerSubmitting(false);
     }
   };
@@ -294,66 +223,55 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
   };
 
   const handleRemoveCaretaker = (caretakerId: string) => {
-    if (confirm('Are you sure you want to remove this caretaker?')) {
+    if (!confirm('Are you sure you want to remove this caretaker?')) return;
+    void runChange(`caretaker:${caretakerId}`, async () => {
+      await caretakersApi.delete(caretakerId);
       dashboard.removeCaretaker(caretakerId);
       onRefresh();
-    }
+    });
   };
 
-  const handleAddSystem = () => {
-    const system = new SystemComponent(
-      `SYS-${Date.now()}`,
-      systemForm.name,
-      systemForm.version,
-      systemForm.description,
-      systemForm.status
-    );
-    dashboard.addSystemComponent(system);
+  const handleAddSystem = () => runChange('system', async () => {
+    if (!systemForm.name.trim()) throw new Error('System name is required.');
+    const componentId = `SYS-${Date.now()}`;
+    await systemApi.createComponent({ componentId, ...systemForm, name: systemForm.name.trim() });
+    dashboard.addSystemComponent(new SystemComponent(componentId, systemForm.name.trim(), systemForm.version, systemForm.description, systemForm.status));
     setShowAddSystem(false);
     setSystemForm({ name: '', version: '', description: '', status: 'online' });
     onRefresh();
-  };
+  });
 
-  const handleToggleSystemStatus = (componentId: string, currentStatus: SystemStatus) => {
+  const handleToggleSystemStatus = (componentId: string, currentStatus: SystemStatus) => runChange(`system:${componentId}`, async () => {
     const component = dashboard.getSystemComponent(componentId);
-    if (component) {
-      const newStatus: SystemStatus = 
-        currentStatus === 'online' ? 'offline' : 
-        currentStatus === 'offline' ? 'maintenance' : 'online';
-      component.setStatus(newStatus);
-      onRefresh();
-    }
-  };
+    if (!component) throw new Error('System component was not found.');
+    const status: SystemStatus = currentStatus === 'online' ? 'offline' : currentStatus === 'offline' ? 'maintenance' : 'online';
+    await systemApi.updateComponent(componentId, { status });
+    component.setStatus(status);
+    onRefresh();
+  });
 
   const handleRemoveSystem = (componentId: string) => {
-    if (confirm('Remove this system component?')) {
+    if (!confirm('Remove this system component?')) return;
+    void runChange(`system:${componentId}`, async () => {
+      await systemApi.deleteComponent(componentId);
       dashboard.removeSystemComponent(componentId);
       onRefresh();
-    }
+    });
   };
 
-  const handleApproveLeave = async (request: any) => {
-    const caretaker = dashboard.getCaretaker(request.caretakerId);
-    if (caretaker) {
-      try {
+  const handleApproveLeave = (request: any) => runChange(`leave:${request.requestId}`, async () => {
         await caretakersApi.updateLeaveRequest(request.caretakerId, request.requestId, {
            status: 'approved',
            reviewedBy: user.name,
            temporaryReplacement: replacementCaretaker || undefined
         });
-        request.approve(user.name, replacementCaretaker || undefined);
+        request.approve(user.name, dashboard.getCaretaker(replacementCaretaker)?.name);
         setSelectedLeaveRequest(null);
         setReplacementCaretaker('');
         onRefresh();
-      } catch (error) {
-        console.error('Failed to approve leave request:', error);
-        alert('Failed to approve leave request. Please try again.');
-      }
-    }
-  };
+  });
 
-  const handleRejectLeave = async (request: any) => {
-    try {
+  const handleRejectLeave = (request: any) => runChange(`leave:${request.requestId}`, async () => {
       await caretakersApi.updateLeaveRequest(request.caretakerId, request.requestId, {
          status: 'rejected',
          reviewedBy: user.name
@@ -361,11 +279,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       request.reject(user.name);
       setSelectedLeaveRequest(null);
       onRefresh();
-    } catch (error) {
-      console.error('Failed to reject leave request:', error);
-      alert('Failed to reject leave request. Please try again.');
-    }
-  };
+  });
 
   const handleAcknowledgeEmergency = (alertId: string) => {
     const alert = dashboard.emergencyAlerts.find(a => a.alertId === alertId);
@@ -376,13 +290,14 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-pink-50 pb-20">
+    <div className="care-dashboard min-h-screen pb-28">
+      {operationError && <div role="alert" className="fixed bottom-28 left-4 right-4 z-[60] rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{operationError}<button className="ml-3 underline" onClick={() => setOperationError('')}>Dismiss</button></div>}
       {/* Header */}
-      <div className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+      <div className="care-dashboard-header bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
         <div className="px-3 py-2.5">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-400 to-pink-400 flex items-center justify-center text-white">
+              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-teal-600 to-emerald-600 flex items-center justify-center text-white">
                 <Shield className="w-4 h-4" />
               </div>
               <div>
@@ -414,8 +329,15 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       </div>
 
       {/* Content */}
-      <div className="px-3 py-3">
+      <div className="care-dashboard-content px-4 py-6 max-w-6xl mx-auto">
+        <section className="care-workspace-intro">
+          <div><span>CARECONNECT / YOUR WORKSPACE</span><h1>A clearer view of your care community.</h1><p>People, wellbeing, and daily operations in one connected workspace.</p></div>
+          <div className="care-workspace-emblem" aria-hidden="true"><img src="/careconnect-companion.png" alt="" /></div>
+        </section>
         {/* SOS Emergency Banner — always visible when active */}
+        {Object.entries(loadErrors).filter(([,message])=>message).map(([key,message])=><div role="alert" key={key} className="mb-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900">Could not load {key}: {message}<button type="button" className="ml-3 underline" onClick={()=>void refreshRecords()}>Retry</button></div>)}
+        <PersistedCareAlerts includeSos={false} />
+        <MonitoringIncidents residents={dashboard.residents} />
         {sosAlerts.length > 0 && (
           <div className="mb-3 space-y-2">
             {sosAlerts.map(alert => (
@@ -427,15 +349,15 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                     </div>
                     <div>
                       <p className="font-black text-lg">🚨 SOS EMERGENCY</p>
-                      <p className="text-red-100 text-sm font-semibold">{alert.resident_name || 'Unknown Patient'} — {alert.message}</p>
-                      <p className="text-red-200 text-xs mt-0.5">{new Date(alert.created_at).toLocaleString()}</p>
+                      <p className="text-red-100 text-sm font-semibold">{alert.resident_name || 'Resident'} — {alert.message}</p>
+                      <p className="text-red-100 text-sm">From: {alert.caretaker_name || alert.sender_name || "Resident"} · Location: {alert.location || "Location not recorded"}</p><p className="text-red-200 text-xs mt-0.5">{new Date(alert.created_at).toLocaleString()}</p>
                     </div>
                   </div>
                   <button
                     onClick={() => handleResolveSOS(alert.id)}
                     className="bg-white text-red-600 font-bold text-sm px-4 py-2 rounded-lg hover:bg-red-50 transition-colors shadow-md"
                   >
-                    Resolve
+                    Acknowledge
                   </button>
                 </div>
               </div>
@@ -448,14 +370,14 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
             {/* Stats Grid */}
             <div className="grid grid-cols-2 gap-2">
               <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
-                <Users className="w-6 h-6 text-blue-500 mb-1" />
+                <Users className="w-6 h-6 text-teal-500 mb-1" />
                 <p className="text-xl font-bold text-gray-800">{dashboard.residents.length}</p>
                 <p className="text-xs text-gray-600">Residents</p>
               </div>
 
               <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
                 <Users className="w-6 h-6 text-green-500 mb-1" />
-                <p className="text-xl font-bold text-gray-800">{dashboard.caretakers.length}</p>
+                <p className="text-xl font-bold text-gray-800">{dashboard.caretakers.length}</p><p className="text-xs text-gray-500">{dashboard.caretakers.filter(c => c.isActive).length} active · {dashboard.caretakers.filter(c => !c.isActive).length} inactive</p>
                 <p className="text-xs text-gray-600">Caretakers</p>
               </div>
 
@@ -493,10 +415,10 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
             {/* Quick Actions */}
             <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
               <h3 className="font-semibold text-gray-800 mb-2 text-sm">Quick Actions</h3>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
                 <button
                   onClick={() => setShowAddResident(true)}
-                  className="py-2 bg-blue-50 text-blue-700 rounded-lg text-xs font-medium active:scale-95 transition-transform flex items-center justify-center gap-1"
+                  className="py-2 bg-teal-50 text-teal-700 rounded-lg text-xs font-medium active:scale-95 transition-transform flex items-center justify-center gap-1"
                 >
                   <Plus className="w-3 h-3" />
                   Add Resident
@@ -529,12 +451,12 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 <h3 className="font-semibold text-gray-800 text-sm">System Components</h3>
                 <button 
                   onClick={() => setActiveView('systems')}
-                  className="text-xs text-blue-600"
+                  className="text-xs text-teal-600"
                 >
                   View All
                 </button>
               </div>
-              <div className="space-y-1.5">
+              <p className="mb-2 text-xs text-gray-600">{dashboard.systemComponents.filter(c => c.status === "online").length} online · {dashboard.systemComponents.filter(c => c.status === "offline").length} offline · {dashboard.systemComponents.filter(c => c.status === "maintenance").length} maintenance</p><div className="space-y-1.5">
                 {dashboard.systemComponents.slice(0, 3).map(comp => (
                   <div key={comp.componentId} className="flex items-center justify-between py-1.5 border-b border-gray-100 last:border-0">
                     <div className="flex items-center gap-2">
@@ -559,7 +481,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
               <h2 className="text-lg font-bold text-gray-800">Residents</h2>
               <button
                 onClick={() => setShowAddResident(true)}
-                className="px-3 py-1.5 bg-blue-500 text-white rounded-lg text-xs font-medium active:scale-95 transition-transform"
+                className="px-3 py-1.5 bg-teal-500 text-white rounded-lg text-xs font-medium active:scale-95 transition-transform"
               >
                 <Plus className="w-3 h-3 inline mr-1" />
                 Add
@@ -607,35 +529,20 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                         </div>
                         <select
                           value={primaryCaretaker?.caretakerId || ''}
-                          onChange={async (e) => {
-                            const newCaretakerId = e.target.value;
-                            if (!newCaretakerId) return;
-                            try {
-                              await caretakersApi.reassignResident({
-                                residentId: resident.residentId,
-                                fromCaretakerId: primaryCaretaker?.caretakerId,
-                                toCaretakerId: newCaretakerId,
-                              });
-                              // Update local state
-                              if (primaryCaretaker) {
-                                primaryCaretaker.assignedResidents = primaryCaretaker.assignedResidents.filter(
-                                  (id: string) => id !== resident.residentId
-                                );
-                              }
-                              const newCaretaker = dashboard.getCaretaker(newCaretakerId);
-                              if (newCaretaker && !newCaretaker.assignedResidents.includes(resident.residentId)) {
-                                newCaretaker.assignedResidents.push(resident.residentId);
-                              }
-                              onRefresh();
-                            } catch (err) {
-                              alert('Failed to reassign caretaker. Please try again.');
-                            }
-                          }}
+                          disabled={Boolean(pendingAction)}
+                          aria-label={`Assigned caretaker for ${resident.name}`}
+                          onChange={e => { const newCaretakerId = e.target.value; void runChange(`assignment:${resident.residentId}`, async () => {
+                            await caretakersApi.reassignResident({ residentId: resident.residentId, toCaretakerId: newCaretakerId || null });
+                            dashboard.caretakers.forEach(c => { c.assignedResidents = c.assignedResidents.filter(id => id !== resident.residentId); });
+                            const assigned = dashboard.getCaretaker(newCaretakerId);
+                            if (assigned) assigned.assignedResidents.push(resident.residentId);
+                            onRefresh();
+                          }); }}
                           className="text-xs border border-teal-300 rounded-lg px-2 py-1 bg-white text-teal-900 font-medium cursor-pointer focus:ring-2 focus:ring-teal-400 focus:outline-none"
                         >
-                          <option value="">Select...</option>
-                          {dashboard.caretakers.map(c => (
-                            <option key={c.caretakerId} value={c.caretakerId}>
+                          <option value="">Unassigned</option>
+                          {dashboard.caretakers.filter(c => c.isActive || c.caretakerId === primaryCaretaker?.caretakerId).map(c => (
+                            <option key={c.caretakerId} value={c.caretakerId} disabled={!c.isActive}>
                               {c.name} ({c.specialization || 'General'})
                             </option>
                           ))}
@@ -644,16 +551,16 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                     </div>
 
                     <div className="grid grid-cols-3 gap-2 text-xs">
-                      <div className="bg-blue-50 rounded p-1.5 text-center">
-                        <p className="text-blue-900 font-bold">{resident.getAllMedications().length}</p>
-                        <p className="text-blue-700">Meds</p>
+                      <div className="bg-teal-50 rounded p-1.5 text-center">
+                        <p className="text-teal-900 font-bold">{resident.getAllMedications().length}</p>
+                        <p className="text-teal-700">Meds</p>
                       </div>
                       <div className="bg-purple-50 rounded p-1.5 text-center">
                         <p className="text-purple-900 font-bold">{resident.prescriptions.length}</p>
                         <p className="text-purple-700">Rx</p>
                       </div>
                       <div className="bg-green-50 rounded p-1.5 text-center">
-                        <p className="text-green-900 font-bold">{resident.getLatestEmotionalState()?.stateScore || '--'}</p>
+                        <p className="text-green-900 font-bold">{resident.getLatestEmotionalState()?.stateScore ?? '--'}</p>
                         <p className="text-green-700">Wellness</p>
                       </div>
                     </div>
@@ -751,7 +658,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                             {dashboard.caretakers
                               .filter(c => c.caretakerId !== request.caretakerId && c.isActive)
                               .map(c => (
-                                <option key={c.caretakerId} value={c.name}>{c.name}</option>
+                                <option key={c.caretakerId} value={c.caretakerId}>{c.name}</option>
                               ))
                             }
                           </select>
@@ -767,13 +674,15 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                             Cancel
                           </button>
                           <button
-                            onClick={() => handleRejectLeave(request)}
+                            disabled={Boolean(pendingAction)}
+                            onClick={() => void handleRejectLeave(request)}
                             className="py-1.5 bg-red-500 text-white rounded text-xs font-medium"
                           >
                             Reject
                           </button>
                           <button
-                            onClick={() => handleApproveLeave(request)}
+                            disabled={Boolean(pendingAction)}
+                            onClick={() => void handleApproveLeave(request)}
                             className="py-1.5 bg-green-500 text-white rounded text-xs font-medium"
                           >
                             Approve
@@ -783,7 +692,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                     ) : (
                       <button
                         onClick={() => setSelectedLeaveRequest(request)}
-                        className="w-full py-2 bg-blue-500 text-white rounded-lg text-xs font-medium mt-2"
+                        className="w-full py-2 bg-teal-500 text-white rounded-lg text-xs font-medium mt-2"
                       >
                         Review Request
                       </button>
@@ -850,181 +759,11 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
             </div>
           </div>
         )}
-
-        {activeView === 'doctors' && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-bold text-gray-800">Doctors</h2>
-              <button
-                onClick={openAddDoctor}
-                className="px-3 py-1.5 bg-teal-500 text-white rounded-lg text-xs font-medium active:scale-95 transition-transform"
-              >
-                <Plus className="w-3 h-3 inline mr-1" />
-                Add
-              </button>
-            </div>
-
-            {doctors.length === 0 ? (
-              <div className="bg-white rounded-lg p-8 text-center">
-                <Stethoscope className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-                <p className="text-sm text-gray-500">No doctors registered yet.</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {doctors.map(doc => (
-                  <div key={doc.doctor_id} className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-teal-100 flex items-center justify-center flex-shrink-0">
-                          <Stethoscope className="w-5 h-5 text-teal-600" />
-                        </div>
-                        <div>
-                          <h3 className="font-semibold text-gray-800 text-sm">Dr. {doc.name}</h3>
-                          <p className="text-xs text-gray-500">{doc.specialization || 'General'}</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => openEditDoctor(doc)}
-                          className="p-1.5 text-teal-600 hover:bg-teal-50 rounded"
-                        >
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleRemoveDoctor(doc.doctor_id)}
-                          className="p-1.5 text-red-600 hover:bg-red-50 rounded"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 text-xs">
-                      {doc.hospital && (
-                        <div className="bg-blue-50 rounded p-1.5 col-span-3">
-                          <p className="text-blue-800">🏥 {doc.hospital}</p>
-                        </div>
-                      )}
-                      {doc.phone && (
-                        <div className="bg-green-50 rounded p-1.5">
-                          <p className="text-green-800">📞 {doc.phone}</p>
-                        </div>
-                      )}
-                      {doc.email && (
-                        <div className="bg-purple-50 rounded p-1.5 col-span-2">
-                          <p className="text-purple-800 truncate">✉️ {doc.email}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeView === 'complaints' && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-bold text-gray-800">Patient Complaints</h2>
-              <span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-0.5 rounded-full">
-                {complaints.filter(c => c.status === 'pending').length} pending
-              </span>
-            </div>
-
-            {complaints.length === 0 ? (
-              <div className="bg-white rounded-lg p-8 text-center shadow-sm border border-gray-200">
-                <MessageSquare className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-                <p className="text-gray-500 text-sm">No complaints received yet.</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {complaints.map(c => (
-                  <div key={c.id} className={`bg-white rounded-lg p-3 shadow-sm border ${
-                    c.status === 'pending' ? 'border-yellow-300' :
-                    c.status === 'reviewed' ? 'border-blue-200' :
-                    'border-green-200'
-                  }`}>
-                    <div className="flex items-start justify-between mb-2">
-                      <div>
-                        <h3 className="font-semibold text-gray-800 text-sm">{c.subject}</h3>
-                        <p className="text-xs text-gray-500">
-                          {c.resident_name || 'Unknown Patient'} • {new Date(c.created_at).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                        c.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                        c.status === 'reviewed' ? 'bg-blue-100 text-blue-700' :
-                        'bg-yellow-100 text-yellow-700'
-                      }`}>
-                        {c.status?.toUpperCase()}
-                      </span>
-                    </div>
-
-                    <p className="text-sm text-gray-600 mb-3">{c.message}</p>
-
-                    {c.admin_response && (
-                      <div className="bg-purple-50 rounded-lg p-2 mb-3 border border-purple-100">
-                        <p className="text-xs font-semibold text-purple-700 mb-1">Your Response:</p>
-                        <p className="text-xs text-purple-900">{c.admin_response}</p>
-                        {c.responded_by && <p className="text-[10px] text-purple-500 mt-1 italic">— {c.responded_by}</p>}
-                      </div>
-                    )}
-
-                    {respondingTo === c.id ? (
-                      <div className="space-y-2">
-                        <textarea
-                          placeholder="Write your response..."
-                          value={responseText}
-                          onChange={e => setResponseText(e.target.value)}
-                          className="w-full px-3 py-2 text-sm border rounded-lg resize-none"
-                          rows={3}
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => { setRespondingTo(null); setResponseText(''); }}
-                            className="flex-1 py-2 border border-gray-300 text-gray-600 rounded-lg text-xs font-medium"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => handleRespondComplaint(c.id)}
-                            disabled={!responseText.trim()}
-                            className="flex-1 py-2 bg-purple-500 text-white rounded-lg text-xs font-medium disabled:opacity-50 flex items-center justify-center gap-1"
-                          >
-                            <Send className="w-3 h-3" /> Send
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex gap-2">
-                        {c.status !== 'resolved' && (
-                          <>
-                            <button
-                              onClick={() => { setRespondingTo(c.id); setResponseText(c.admin_response || ''); }}
-                              className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
-                            >
-                              <Eye className="w-3 h-3" /> {c.admin_response ? 'Edit Response' : 'Respond'}
-                            </button>
-                            <button
-                              onClick={() => handleResolveComplaint(c.id)}
-                              className="flex-1 py-2 bg-green-50 text-green-700 rounded-lg text-xs font-medium flex items-center justify-center gap-1"
-                            >
-                              <CheckCircle className="w-3 h-3" /> Resolve
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Bottom Navigation */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+      <div role="navigation" aria-label="Administrator navigation" className="care-bottom-nav fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+        <div className="care-nav-brand"><Shield aria-hidden="true" /><div>CareConnect.<small>Administration</small></div></div>
         <div className="px-1 py-1.5">
           <div className="flex justify-around">
             <button
@@ -1077,38 +816,16 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
               <Settings className="w-5 h-5" />
               <span className="text-xs">Systems</span>
             </button>
-            <button
-              onClick={() => setActiveView('doctors')}
-              className={`flex flex-col items-center gap-0.5 py-1.5 px-2 rounded-lg transition-colors min-w-0 ${
-                activeView === 'doctors' ? 'text-teal-600 bg-teal-50' : 'text-gray-500'
-              }`}
-            >
-              <Stethoscope className="w-5 h-5" />
-              <span className="text-xs">Doctors</span>
-            </button>
-            <button
-              onClick={() => setActiveView('complaints')}
-              className={`flex flex-col items-center gap-0.5 py-1.5 px-2 rounded-lg transition-colors min-w-0 relative ${
-                activeView === 'complaints' ? 'text-red-600 bg-red-50' : 'text-gray-500'
-              }`}
-            >
-              <MessageSquare className="w-5 h-5" />
-              <span className="text-xs">Complaints</span>
-              {complaints.filter(c => c.status === 'pending').length > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-red-500 text-white text-xs rounded-full flex items-center justify-center font-bold">
-                  {complaints.filter(c => c.status === 'pending').length}
-                </span>
-              )}
-            </button>
+
           </div>
         </div>
       </div>
 
       {/* Modals */}
       {showAddResident && (
-        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-blue-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
+            <div className="sticky top-0 bg-teal-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
               <h3 className="font-semibold text-base">Add New Resident</h3>
               <button onClick={() => setShowAddResident(false)} className="p-1">
                 <X className="w-5 h-5" />
@@ -1205,8 +922,8 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 </button>
                 <button
                   onClick={handleAddResident}
-                  disabled={!residentForm.name || !residentForm.age}
-                  className="py-2.5 bg-blue-500 text-white rounded-lg font-medium text-sm disabled:opacity-50"
+                  disabled={pendingAction !== null || !residentForm.name || !residentForm.age}
+                  className="py-2.5 bg-teal-500 text-white rounded-lg font-medium text-sm disabled:opacity-50"
                 >
                   Add Resident
                 </button>
@@ -1217,7 +934,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       )}
 
       {showAddCaretaker && (
-        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
             <div className="bg-green-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
               <h3 className="font-semibold text-base">Add New Caretaker</h3>
@@ -1248,14 +965,29 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 className="w-full px-3 py-2 text-sm border rounded-lg"
                 disabled={caretakerSubmitting}
               />
-              <input
-                type="password"
-                placeholder="Temporary Password (min 6 chars)"
-                value={caretakerForm.password}
-                onChange={(e) => setCaretakerForm({ ...caretakerForm, password: e.target.value })}
-                className="w-full px-3 py-2 text-sm border rounded-lg"
-                disabled={caretakerSubmitting}
-              />
+              <div className="relative">
+                <input
+                  type={showCaretakerPassword ? 'text' : 'password'}
+                  placeholder="Temporary Password"
+                  value={caretakerForm.password}
+                  onChange={(e) => setCaretakerForm({ ...caretakerForm, password: e.target.value })}
+                  className="w-full px-3 py-2 pr-10 text-sm border rounded-lg"
+                  autoComplete="new-password"
+                  minLength={6}
+                  disabled={caretakerSubmitting}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCaretakerPassword((visible) => !visible)}
+                  className="absolute inset-y-0 right-0 px-3 text-gray-500"
+                  aria-label={showCaretakerPassword ? 'Hide caretaker password' : 'Show caretaker password'}
+                  aria-pressed={showCaretakerPassword}
+                  disabled={caretakerSubmitting}
+                >
+                  {showCaretakerPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">Use at least 6 characters for the temporary password.</p>
               <input
                 type="tel"
                 placeholder="Phone"
@@ -1285,7 +1017,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 </button>
                 <button
                   onClick={handleAddCaretaker}
-                  disabled={!caretakerForm.name || !caretakerForm.email || caretakerForm.password.length < 6 || caretakerSubmitting}
+                  disabled={!caretakerForm.name || !caretakerForm.email || Boolean(getPasswordValidationError(caretakerForm.password)) || caretakerSubmitting}
                   className="py-2.5 bg-green-500 text-white rounded-lg font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1"
                 >
                   {caretakerSubmitting ? (
@@ -1304,7 +1036,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       )}
 
       {showAddSystem && (
-        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
             <div className="bg-purple-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
               <h3 className="font-semibold text-base">Add System Component</h3>
@@ -1352,38 +1084,10 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 </button>
                 <button
                   onClick={handleAddSystem}
-                  disabled={!systemForm.name || !systemForm.version}
+                  disabled={pendingAction !== null || !systemForm.name || !systemForm.version}
                   className="py-2.5 bg-purple-500 text-white rounded-lg font-medium text-sm disabled:opacity-50"
                 >
                   Add System
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showAddDoctor && (
-        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
-          <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
-            <div className="bg-teal-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
-              <h3 className="font-semibold text-base">{editingDoctorId ? 'Edit Doctor' : 'Register Doctor'}</h3>
-              <button onClick={() => { setShowAddDoctor(false); setEditingDoctorId(null); }} className="p-1">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              <input type="text" placeholder="Doctor Name *" value={doctorForm.name} onChange={e => setDoctorForm({...doctorForm, name: e.target.value})} className="w-full px-3 py-2 text-sm border rounded-lg" />
-              <input type="text" placeholder="Specialization" value={doctorForm.specialization} onChange={e => setDoctorForm({...doctorForm, specialization: e.target.value})} className="w-full px-3 py-2 text-sm border rounded-lg" />
-              <input type="text" placeholder="Hospital / Clinic" value={doctorForm.hospital} onChange={e => setDoctorForm({...doctorForm, hospital: e.target.value})} className="w-full px-3 py-2 text-sm border rounded-lg" />
-              <div className="grid grid-cols-2 gap-2">
-                <input type="tel" placeholder="Phone" value={doctorForm.phone} onChange={e => setDoctorForm({...doctorForm, phone: e.target.value})} className="w-full px-3 py-2 text-sm border rounded-lg" />
-                <input type="email" placeholder="Email" value={doctorForm.email} onChange={e => setDoctorForm({...doctorForm, email: e.target.value})} className="w-full px-3 py-2 text-sm border rounded-lg" />
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-2">
-                <button onClick={() => { setShowAddDoctor(false); setEditingDoctorId(null); }} className="py-2.5 border-2 border-gray-300 text-gray-700 rounded-lg font-medium text-sm">Cancel</button>
-                <button onClick={handleAddDoctor} disabled={!doctorForm.name} className="py-2.5 bg-teal-500 text-white rounded-lg font-medium text-sm disabled:opacity-50">
-                  {editingDoctorId ? 'Save Changes' : 'Register Doctor'}
                 </button>
               </div>
             </div>

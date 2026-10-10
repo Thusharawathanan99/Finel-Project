@@ -4,12 +4,16 @@ export class Prescription {
   prescriptionId: string;
   dateIssued: Date;
   doctorName: string;
+  patientName?: string;
+  rawText?: string;
   medications: Medication[]; // Composition: medications cannot exist without prescription
 
-  constructor(prescriptionId: string, dateIssued: Date, doctorName: string) {
+  constructor(prescriptionId: string, dateIssued: Date, doctorName: string, patientName?: string, rawText?: string) {
     this.prescriptionId = prescriptionId;
     this.dateIssued = dateIssued;
     this.doctorName = doctorName;
+    this.patientName = patientName;
+    this.rawText = rawText;
     this.medications = [];
   }
 

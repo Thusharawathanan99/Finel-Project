@@ -1,174 +1,44 @@
-/**
- * Gemini API Service
- * Uses Google's Gemini model for:
- * 1. Prescription OCR verification & correction
- * 2. Medication extraction from ambiguous text
- * 3. Meal plan generation (see meal-plan module)
- */
+/** Authenticated AI transport. Provider credentials and model selection stay on the server. */
+import { apiPost } from '../../services/apiService';
 
-import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
-
-let genAI: GoogleGenerativeAI | null = null;
-let model: GenerativeModel | null = null;
-
-const DEFAULT_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
-
-function parseGeminiModels(): string[] {
-  const configured = import.meta.env.VITE_GEMINI_MODELS as string | undefined;
-  if (!configured) return DEFAULT_GEMINI_MODELS;
-
-  const parsed = configured
-    .split(',')
-    .map(m => m.trim())
-    .filter(Boolean);
-
-  return parsed.length > 0 ? parsed : DEFAULT_GEMINI_MODELS;
+type ContentPart = { text: string } | { inlineData: { mimeType: string; data: string } };
+interface ServerModel {
+  generateContent(contents: ContentPart[] | string): Promise<{ response: { text: () => string } }>;
 }
-
-// Models to try, in order of preference. Override with VITE_GEMINI_MODELS="modelA,modelB".
-const GEMINI_MODELS = parseGeminiModels();
-const PERMANENTLY_UNAVAILABLE_MODELS = new Set<string>();
-
-const OVERLOAD_RETRY_BASE_MS = 5000;
-const OVERLOAD_RETRY_MAX_MS = 15000;
-const GEMINI_REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_GEMINI_REQUEST_TIMEOUT_MS || 60000);
-const GEMINI_VERIFY_TIMEOUT_MS = Number(import.meta.env.VITE_GEMINI_VERIFY_TIMEOUT_MS || 60000);
-const GEMINI_VISION_TIMEOUT_MS = Number(import.meta.env.VITE_GEMINI_VISION_TIMEOUT_MS || 90000);
-const GEMINI_VERIFY_MAX_RETRIES = Number(import.meta.env.VITE_GEMINI_VERIFY_MAX_RETRIES || 2);
-const GEMINI_VISION_MAX_RETRIES = Number(import.meta.env.VITE_GEMINI_VISION_MAX_RETRIES || 2);
-
-async function withGeminiRequestTimeout<T>(task: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Gemini request timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    task.then(
-      value => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      error => {
-        clearTimeout(timer);
-        reject(error);
-      }
-    );
-  });
+function createServerModel(task: 'prescription' | 'meal-plan' = 'prescription'): ServerModel {
+  return {
+  async generateContent(contents) {
+    const parts = typeof contents === 'string' ? [{ text: contents }] : contents;
+    const result = await apiPost<{ text: string }>('/ai/generate', { contents: parts, task });
+    if (typeof result.text !== 'string' || !result.text.trim()) throw new Error('The analysis service returned an empty result. Please try again.');
+    return { response: { text: () => result.text } };
+  },
+  };
 }
+const serverModel = createServerModel();
+const GEMINI_VERIFY_TIMEOUT_MS = 180000;
+const GEMINI_VISION_TIMEOUT_MS = 180000;
+const GEMINI_VERIFY_MAX_RETRIES = 0;
+const GEMINI_VISION_MAX_RETRIES = 0;
+function getModel(): ServerModel { return serverModel; }
 
-function isRetryableGeminiError(errMsg: string): boolean {
-  return (
-    errMsg.includes('429') ||
-    errMsg.includes('quota') ||
-    errMsg.includes('503') ||
-    errMsg.includes('500') ||
-    errMsg.includes('overloaded') ||
-    errMsg.includes('high demand') ||
-    errMsg.includes('temporarily unavailable') ||
-    errMsg.includes('timeout')
-  );
+/** The server owns provider retries; duplicate client requests must not consume extra quota. */
+export async function callWithRetry<T>(fn: (model: ServerModel) => Promise<T>, options?: { maxRetries?: number; timeoutMs?: number; task?: 'prescription' | 'meal-plan' }): Promise<T> {
+  return fn(options?.task === 'meal-plan' ? createServerModel('meal-plan') : serverModel);
 }
-
-function computeBackoffDelay(attempt: number): number {
-  const exponential = Math.min(OVERLOAD_RETRY_MAX_MS, OVERLOAD_RETRY_BASE_MS * Math.pow(2, attempt));
-  const jitter = Math.floor(Math.random() * 500);
-  return exponential + jitter;
-}
-
-/**
- * Initialize the Gemini API client. Must be called before any API calls.
- */
-function getModel(modelOverride?: string): GenerativeModel {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('VITE_GEMINI_API_KEY not configured in environment');
-  }
-
-  if (modelOverride) {
-    if (!genAI) genAI = new GoogleGenerativeAI(apiKey);
-    return genAI.getGenerativeModel({ model: modelOverride });
-  }
-
-  if (model) return model;
-
-  genAI = new GoogleGenerativeAI(apiKey);
-  model = genAI.getGenerativeModel({ model: GEMINI_MODELS[0] });
-  return model;
-}
-
-/**
- * Retry a Gemini API call with model fallback on 429 errors.
- */
-export async function callWithRetry<T>(
-  fn: (m: GenerativeModel) => Promise<T>,
-  options?: {
-    maxRetries?: number;
-    timeoutMs?: number;
-  }
-): Promise<T> {
-  const maxRetries = options?.maxRetries ?? 1;
-  const timeoutMs = options?.timeoutMs ?? GEMINI_REQUEST_TIMEOUT_MS;
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const modelsToTry = GEMINI_MODELS.filter(modelName => !PERMANENTLY_UNAVAILABLE_MODELS.has(modelName));
-    const activeModels = modelsToTry.length > 0 ? modelsToTry : GEMINI_MODELS;
-
-    for (const modelName of activeModels) {
-      try {
-        const m = getModel(modelName);
-        const result = await withGeminiRequestTimeout(fn(m), timeoutMs);
-        model = m; // Cache the working model
-        return result;
-      } catch (error: unknown) {
-        lastError = error;
-        const errMsg = error instanceof Error ? error.message : String(error);
-
-        // 404 = API not enabled or model doesn't exist — try next model
-        if (errMsg.includes('404')) {
-          PERMANENTLY_UNAVAILABLE_MODELS.add(modelName);
-          console.warn(`[Gemini] Model "${modelName}" returned 404 — trying next model...`);
-          continue;
-        }
-
-        // 429/5xx and overload text indicate temporary pressure, so we rotate models and retry.
-        if (isRetryableGeminiError(errMsg.toLowerCase())) {
-          console.warn(`[Gemini] Model "${modelName}" overloaded/limited (${errMsg.substring(0, 50)}...), trying next...`);
-          continue;
-        }
-
-        // Any other syntax/auth error — throw immediately
-        throw error;
-      }
-    }
-
-    // All models failed this attempt
-    if (attempt < maxRetries) {
-      const waitMs = computeBackoffDelay(attempt);
-      console.log(`[Gemini] All models failed, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})...`);
-      await new Promise(r => setTimeout(r, waitMs));
-    }
-  }
-
-  // Build a helpful error message
-  const errMsg = lastError instanceof Error ? lastError.message : String(lastError);
-  if (errMsg.includes('404')) {
-    throw new Error(
-      'Gemini API models not found (404). Check VITE_GEMINI_MODELS and ensure "Generative Language API" is enabled:\n' +
-      'Go to: https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com\n' +
-      'and click "Enable".'
-    );
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
 export interface GeminiMedicationResult {
+  patientName?: string;
+  doctorName?: string;
+  date?: string;
   medications: {
     drugName: string;
     dosage: string;
     frequency: string;
-    route: string;
+    duration?: string;
+    instructions?: string;
+    route?: string;
     confidence: number;
+    needsReview?: boolean;
     warnings: string[];
   }[];
   corrections: string[];
@@ -184,39 +54,54 @@ export async function verifyPrescriptionWithGemini(
   ocrText: string,
   imageBase64?: string
 ): Promise<GeminiMedicationResult> {
-  const prompt = `You are a clinical pharmacist AI assistant. Analyze the following prescription and return a JSON object with the extracted medications.
+  const prompt = `You are an expert clinical pharmacist AI. Analyze the following prescription and extract all structured data accurately.
 
 ${ocrText.trim().length > 10 ? `OCR Text:
 """
 ${ocrText}
 """
-` : 'No OCR text is available. Extract ALL information directly from the prescription image.\n'}
-INSTRUCTIONS:
-1. If an image is provided, read ALL text from the prescription image first
-2. Identify every medication mentioned
-3. For each medication, extract: drugName, dosage, frequency, route
-4. Correct any obvious OCR errors in drug names (e.g., "Llsinopril" → "Lisinopril")
-5. Expand any abbreviations (BID → twice daily, QD → once daily, PO → by mouth)
-6. If a field is ambiguous or missing, provide your best interpretation with lower confidence
-7. Flag any potential drug interactions as warnings
-8. Rate your confidence 0-1 for each medication
-9. Include the raw text you extracted from the image in "rawText"
+` : 'No OCR text is available. Read and extract ALL information directly from the prescription image.\n'}
 
-Return ONLY valid JSON in this exact format:
+EXTRACTION INSTRUCTIONS:
+1. Extract ALL prescription header info:
+   - "patientName": Name of patient (e.g. "John Doe"). If illegible, absent, or low confidence, output "Needs Review".
+   - "doctorName": Name of prescribing doctor with title (e.g. "Dr. Sarah Connor"). If illegible or absent, output "Needs Review".
+   - "date": Date of issue (e.g. "2026-10-04"). If illegible or absent, output "Needs Review".
+2. Extract EVERY medication listed:
+   - "drugName": Full brand or generic drug name.
+   - "dosage": Strength/amount (e.g. "500mg", "10ml", "1 tablet"). If illegible or absent, output "Needs Review".
+   - "frequency": How often to take (e.g. "Once daily", "Twice daily after meals", "Every 8 hours"). Expand clinical abbreviations (BID -> Twice daily, TID -> Three times daily, QD -> Once daily, PRN -> As needed). If illegible or absent, output "Needs Review".
+   - "duration": How long to take (e.g. "7 days", "14 days", "1 month", "Ongoing"). If absent, output "As directed".
+   - "instructions": Specific instructions (e.g. "Take after food with full glass of water", "Apply topically"). If absent, output "Follow doctor guidance".
+   - "route": e.g. "oral", "topical", "inhalation".
+   - "confidence": Float between 0.0 and 1.0 representing your confidence in this extraction.
+   - "needsReview": true if confidence < 0.70 or if any critical field (drugName, dosage, frequency) is uncertain or marked "Needs Review"; false otherwise.
+   - "warnings": Potential interactions, allergies, or precautions.
+3. If ANY text cannot be recognized confidently, output "Needs Review" instead of guessing or hallucinating false information.
+4. Correct obvious handwriting/OCR typos (e.g. "Llsinopril" -> "Lisinopril") and list corrections in "corrections".
+5. In "rawText", include the complete raw text read from the prescription.
+
+Return ONLY valid JSON matching this exact structure:
 {
-  "rawText": "Full text extracted from the prescription image",
+  "rawText": "Full text read from the prescription",
+  "patientName": "John Doe",
+  "doctorName": "Dr. Sarah Connor",
+  "date": "2026-10-04",
   "medications": [
     {
-      "drugName": "Lisinopril",
-      "dosage": "10mg",
-      "frequency": "once daily",
-      "route": "by mouth",
+      "drugName": "Amoxicillin",
+      "dosage": "500mg",
+      "frequency": "Three times daily after meals",
+      "duration": "7 days",
+      "instructions": "Take with full glass of water",
+      "route": "oral",
       "confidence": 0.95,
+      "needsReview": false,
       "warnings": []
     }
   ],
-  "corrections": ["Corrected 'Llsinopril' to 'Lisinopril'"],
-  "overallConfidence": 0.9
+  "corrections": [],
+  "overallConfidence": 0.95
 }`;
 
   try {
@@ -262,6 +147,29 @@ Return ONLY valid JSON in this exact format:
     }
 
     const parsed = JSON.parse(jsonMatch[0]) as GeminiMedicationResult;
+    parsed.patientName = parsed.patientName || 'Needs Review';
+    parsed.doctorName = parsed.doctorName || 'Needs Review';
+    parsed.date = parsed.date || 'Needs Review';
+
+    parsed.medications = (parsed.medications || []).map(m => {
+      const dosage = (!m.dosage || m.dosage.trim().toLowerCase() === 'missing' || m.dosage.trim().toLowerCase() === 'n/a') ? 'Needs Review' : m.dosage.trim();
+      const frequency = (!m.frequency || m.frequency.trim().toLowerCase() === 'missing' || m.frequency.trim().toLowerCase() === 'n/a') ? 'Needs Review' : m.frequency.trim();
+      const duration = m.duration?.trim() || 'As directed';
+      const instructions = m.instructions?.trim() || 'Follow doctor guidance';
+      const confidence = Number.isFinite(m.confidence) ? Math.max(0, Math.min(1, m.confidence)) : 0;
+      const needsReview = Boolean(m.needsReview || confidence < 0.65 || dosage === 'Needs Review' || frequency === 'Needs Review');
+
+      return {
+        ...m,
+        dosage,
+        frequency,
+        duration,
+        instructions,
+        confidence,
+        needsReview,
+      };
+    });
+
     console.log(`[Gemini] Verified ${parsed.medications.length} medications with ${(parsed.overallConfidence * 100).toFixed(0)}% confidence`);
     if (parsed.rawText) {
       console.log(`[Gemini] Extracted ${parsed.rawText.length} chars of raw text`);
@@ -283,13 +191,13 @@ Return ONLY valid JSON in this exact format:
  * Check if Gemini verification is enabled and configured.
  */
 export function isGeminiEnabled(): boolean {
-  return !!import.meta.env.VITE_GEMINI_API_KEY;
+  return import.meta.env.VITE_ENABLE_AI !== 'false';
 }
 
 /**
  * Get the Gemini model instance for use by other modules (e.g., meal planning).
  */
-export function getGeminiModel(): GenerativeModel {
+export function getGeminiModel(): ServerModel {
   return getModel();
 }
 

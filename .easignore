@@ -1,0 +1,36 @@
+# Root .easignore
+# Mobile .env files contain intentional public Firebase/API settings. The root
+# .env contains server settings and must never enter an APK build archive.
+/.env
+/.env.*
+!/.env.example
+.git
+**/credentials.json
+**/*credentials*.json
+**/serviceAccount*.json
+**/ServiceAccount*.json
+**/*service-account*.json
+**/*service_account*.json
+**/*firebase-adminsdk*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/*.mobileprovision
+.cache/
+1-ui-ux/
+2-emotion-detector/
+3-prescription-reader/
+4-system-engine/
+.venv/
+.venv-1/
+sample/
+audit/
+*.log
+*.pdf
+**/node_modules/
+**/dist/
+**/.metro-cache/
+**/.expo/

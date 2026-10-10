@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react';
 import { User } from '../models/User';
-import { Heart, Loader, UserPlus } from 'lucide-react';
+import { Eye, EyeOff, Heart, Loader, UserPlus, Shield } from 'lucide-react';
 import {
+  getPasswordValidationError,
+  requestPasswordReset,
   signUp,
   signIn,
 } from '../services/firebaseAuthService';
 import { caretakersApi } from '../services/apiService';
 
 interface SignInSignUpProps {
-  onComplete: (user: User) => void;
+  onComplete: (user: User) => void | Promise<void>;
 }
 
 interface CaretakerOption {
@@ -23,6 +25,10 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
   const [loadingCaretakers, setLoadingCaretakers] = useState(false);
   const [caretakers, setCaretakers] = useState<CaretakerOption[]>([]);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     email: '',
@@ -67,10 +73,14 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     setLoading(true);
 
     try {
       const appUser = await signIn(formData.email, formData.password);
+      if (appUser.role !== 'admin') {
+        throw new Error('Access denied: Admin credentials required. Patients and Caretakers must use the CareConnect Mobile Applications.');
+      }
       const user: User = {
         userId: appUser.uid,
         name: appUser.name,
@@ -78,7 +88,7 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
         role: appUser.role,
         residentId: appUser.residentId,
       };
-      onComplete(user);
+      await onComplete(user);
     } catch (err: any) {
       console.error('[SignIn] Error:', err);
       const code = err?.code || '';
@@ -94,16 +104,37 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
     }
   };
 
+  const handlePasswordReset = async () => {
+    setError('');
+    setNotice('');
+    setResettingPassword(true);
+    try {
+      await requestPasswordReset(formData.email);
+      setNotice('If an account exists for that email, a password reset link has been sent.');
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'auth/too-many-requests') {
+        setError('Too many reset attempts. Please try again later.');
+      } else {
+        setError(err?.message || 'Unable to send the reset email. Please try again.');
+      }
+    } finally {
+      setResettingPassword(false);
+    }
+  };
+
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
 
     if (formData.password !== formData.confirmPassword) {
       setError('Passwords do not match!');
       return;
     }
-    if (formData.password.length < 6) {
-      setError('Password must be at least 6 characters.');
+    const passwordError = getPasswordValidationError(formData.password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     if (!formData.caretakerId) {
@@ -129,14 +160,14 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
         role: appUser.role,
         residentId: appUser.residentId,
       };
-      onComplete(user);
+      await onComplete(user);
     } catch (err: any) {
       console.error('[SignUp] Error:', err);
       const code = err?.code || '';
       if (code === 'auth/email-already-in-use') {
         setError('An account with this email already exists.');
       } else if (code === 'auth/weak-password') {
-        setError('Password is too weak. Use at least 6 characters.');
+        setError('Password is too weak. Use 8+ characters with uppercase, lowercase, and a number.');
       } else if (code === 'auth/invalid-email') {
         setError('Invalid email address.');
       } else {
@@ -148,15 +179,24 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-sky-50 to-indigo-100 flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-2xl shadow-xl p-6">
+    <div className="care-auth min-h-screen flex items-center justify-center p-4">
+      <div className="care-auth-layout">
+      <aside className="care-auth-story">
+        <div className="care-brand"><span className="care-brand-mark"><Heart aria-hidden="true" /></span>CareConnect.</div>
+        <span className="care-eyebrow">YOUR CARE, CONNECTED</span>
+        <h1>A familiar place.<br /><span>A better care day.</span></h1>
+        <p>Stay connected to your health, your team, and the moments that matter.</p>
+        <div className="care-auth-art" aria-hidden="true"><img src="/careconnect-characters.png" alt="" /></div>
+        <div className="care-auth-note">Patient · Caretaker · Administrator<br /><strong>One thoughtfully connected experience.</strong></div>
+      </aside>
+      <div className="w-full max-w-md care-auth-form">
+        <div className="bg-white rounded-2xl shadow-xl p-6 care-auth-card">
           <div className="text-center mb-6">
-            <div className="inline-flex p-3 bg-rose-100 rounded-full mb-3">
-              <Heart className="w-8 h-8 text-rose-500 fill-rose-500" />
+            <div className="inline-flex p-3 bg-teal-50 rounded-2xl mb-3">
+              <Heart className="w-8 h-8 text-teal-700" />
             </div>
-            <h2 className="text-xl font-bold text-gray-800">CareConnect Access</h2>
-            <p className="text-sm text-gray-600 mt-1">One login for admin, caretaker, and patient</p>
+            <h2 className="text-xl font-bold text-gray-800">CareConnect Administration</h2>
+            <p className="text-sm text-gray-600 mt-1">Facility Administrator Web Portal</p>
           </div>
 
           <div className="grid grid-cols-2 gap-2 mb-5 p-1 bg-gray-100 rounded-xl">
@@ -165,9 +205,10 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
               onClick={() => {
                 setMode('signin');
                 setError('');
+                setNotice('');
               }}
               className={`py-2 text-sm font-semibold rounded-lg transition-colors ${
-                mode === 'signin' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600'
+                mode === 'signin' ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-600'
               }`}
               disabled={loading}
             >
@@ -178,9 +219,10 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
               onClick={() => {
                 setMode('signup');
                 setError('');
+                setNotice('');
               }}
               className={`py-2 text-sm font-semibold rounded-lg transition-colors ${
-                mode === 'signup' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-600'
+                mode === 'signup' ? 'bg-white text-teal-700 shadow-sm' : 'text-gray-600'
               }`}
               disabled={loading}
             >
@@ -190,20 +232,26 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
 
           {/* Error Display */}
           {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
               {error}
+            </div>
+          )}
+          {notice && (
+            <div role="status" className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-800">
+              {notice}
             </div>
           )}
           <form onSubmit={mode === 'signin' ? handleSignIn : handleSignUp} className="space-y-4">
             {mode === 'signup' && (
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Full Name</label>
+                <label htmlFor="care-name" className="block text-xs font-medium text-gray-700 mb-1">Full Name</label>
                 <input
+                  id="care-name"
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                   placeholder="John Doe"
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
                   required
                   disabled={loading}
                 />
@@ -211,53 +259,95 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             )}
 
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Email</label>
+              <label htmlFor="care-email" className="block text-xs font-medium text-gray-700 mb-1">Email</label>
               <input
+                id="care-email"
                 type="email"
                 value={formData.email}
                 onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                 placeholder="you@example.com"
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                autoComplete="email"
                 required
                 disabled={loading}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Password</label>
-              <input
-                type="password"
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                placeholder="••••••••"
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-                disabled={loading}
-              />
+              <label htmlFor="care-password" className="block text-xs font-medium text-gray-700 mb-1">Password</label>
+              <div className="relative">
+                <input
+                  id="care-password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  placeholder="Enter your password"
+                  className="w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                  required
+                  disabled={loading}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((visible) => !visible)}
+                  className="absolute inset-y-0 right-0 px-3 text-gray-500 hover:text-teal-700"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  disabled={loading}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+              {mode === 'signin' && (
+                <button
+                  type="button"
+                  onClick={handlePasswordReset}
+                  disabled={loading || resettingPassword}
+                  className="mt-2 text-xs font-semibold text-teal-700 hover:text-teal-900 disabled:opacity-60"
+                >
+                  {resettingPassword ? 'Sending reset link...' : 'Forgot password?'}
+                </button>
+              )}
             </div>
 
             {mode === 'signup' && (
               <>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Confirm Password</label>
-                  <input
-                    type="password"
-                    value={formData.confirmPassword}
-                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                    placeholder="••••••••"
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    required
-                    disabled={loading}
-                  />
+                  <label htmlFor="care-confirmPassword" className="block text-xs font-medium text-gray-700 mb-1">Confirm Password</label>
+                  <div className="relative">
+                    <input
+                      id="care-confirmPassword"
+                      type={showConfirmPassword ? 'text' : 'password'}
+                      value={formData.confirmPassword}
+                      onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                      placeholder="Confirm your password"
+                      className="w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      autoComplete="new-password"
+                      required
+                      disabled={loading}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPassword((visible) => !visible)}
+                      className="absolute inset-y-0 right-0 px-3 text-gray-500 hover:text-teal-700"
+                      aria-label={showConfirmPassword ? 'Hide confirmation password' : 'Show confirmation password'}
+                      aria-pressed={showConfirmPassword}
+                      disabled={loading}
+                    >
+                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">Use 8+ characters with uppercase, lowercase, and a number.</p>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Choose Caretaker</label>
+                  <label htmlFor="care-caretakerId" className="block text-xs font-medium text-gray-700 mb-1">Choose Caretaker</label>
                   <div className="relative">
                     <select
-                      value={formData.caretakerId}
+                      id="care-caretakerId"
+                  value={formData.caretakerId}
                       onChange={(e) => setFormData({ ...formData, caretakerId: e.target.value })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-50"
                       required
                       disabled={loading || loadingCaretakers || caretakers.length === 0}
                     >
@@ -281,18 +371,18 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
 
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">
-                    Resident ID (optional)
+                    New Resident ID (optional)
                   </label>
                   <input
                     type="text"
                     value={formData.residentId}
                     onChange={(e) => setFormData({ ...formData, residentId: e.target.value })}
                     placeholder="Leave blank to auto-create"
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
                     disabled={loading}
                   />
                   <p className="mt-1 text-xs text-gray-500">
-                    If you already have a resident ID, enter it. Otherwise one is created automatically.
+                    Choose a new ID or leave this blank to create one automatically. Ask an administrator to link an existing resident.
                   </p>
                 </div>
               </>
@@ -302,7 +392,7 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
               <button
                 type="submit"
                 disabled={loading || (mode === 'signup' && loadingCaretakers)}
-                className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold text-sm shadow-md active:scale-98 transition-transform disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                className="w-full py-3 bg-gradient-to-r from-teal-700 to-emerald-700 text-white rounded-lg font-semibold text-sm shadow-md active:scale-98 transition-transform disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {loading ? (
                   <>
@@ -316,8 +406,27 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             </div>
           </form>
 
+          {mode === 'signin' && (
+            <div className="mt-4 pt-4 border-t border-gray-100 text-center">
+              <button
+                type="button"
+                onClick={() => onComplete({
+                  userId: 'DEMO',
+                  name: 'Facility Administrator',
+                  email: 'admin@careconnect.com',
+                  role: 'admin',
+                })}
+                className="w-full py-2.5 px-4 bg-teal-50 text-teal-800 hover:bg-teal-100 border border-teal-200 rounded-xl font-medium text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                <Shield className="w-4 h-4 text-teal-700" />
+                Quick Launch: Facility Administrator Dashboard
+              </button>
+            </div>
+          )}
+
 
         </div>
+      </div>
       </div>
     </div>
   );

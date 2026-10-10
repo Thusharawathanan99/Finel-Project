@@ -85,8 +85,8 @@ export function getApiStatus(): {
   mealPlanEnabled: boolean;
 } {
   return {
-    geminiConfigured: !!import.meta.env.VITE_GEMINI_API_KEY,
-    cloudNlpConfigured: !!import.meta.env.VITE_GOOGLE_CLOUD_API_KEY && !!import.meta.env.VITE_GOOGLE_CLOUD_PROJECT_ID,
+    geminiConfigured: import.meta.env.VITE_ENABLE_AI !== 'false',
+    cloudNlpConfigured: import.meta.env.VITE_ENABLE_CLOUD_NLP === 'true',
     mealPlanEnabled: import.meta.env.VITE_ENABLE_MEAL_SUGGESTIONS === 'true',
   };
 }

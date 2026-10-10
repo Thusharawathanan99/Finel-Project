@@ -1,0 +1,98 @@
+{
+  "reviewDate": "2026-10-10",
+  "timezone": "Asia/Colombo",
+  "baseGitHead": "6b82b5774bd15c0159a17725b17005b51c83f8d1",
+  "uncommittedSource": true,
+  "environment": {
+    "platform": "Windows PowerShell",
+    "node": "24.18.0",
+    "defaultPython": "3.14.6"
+  },
+  "checks": [
+    {
+      "command": "npm run typecheck --prefix 1-ui-ux",
+      "exitCode": 0
+    },
+    {
+      "command": "npm run build:web",
+      "exitCode": 0
+    },
+    {
+      "command": "npm run test:regression",
+      "exitCode": 0
+    },
+    {
+      "command": "npm run test:monitoring:ui",
+      "exitCode": 0
+    },
+    {
+      "command": "npm run test:monitoring:mysql",
+      "exitCode": 0
+    },
+    {
+      "command": "npm run test:monitoring:startup",
+      "exitCode": 0
+    },
+    {
+      "command": "python -m unittest discover -s 3-prescription-reader/server/tests -v",
+      "exitCode": 0
+    }
+  ],
+  "selectedSuiteCounts": {
+    "monitoringApiAndNotifications": 94,
+    "monitoringUI": 16,
+    "edge": 34,
+    "prescriptionPython": 14,
+    "apiStartupBoundaries": 8
+  },
+  "interpretation": "Suite counts overlap. Constructed checks are not participant trials, clinical accuracy, camera endurance or phone-delivery evidence. Source hashes cover selected files and do not constitute a complete source snapshot.",
+  "selectedSourceSha256": {
+    "1-ui-ux/src/app/components/monitoring/MonitoringDevices.tsx": "0e9030ea6b24283f6a7283fef988007a176e57dff35d79cb30701042cf434585",
+    "1-ui-ux/src/app/components/monitoring/MonitoringIncidents.tsx": "ac1d5fe3726728fe9af90056713ed3324dcaddeeb154ffaaf0845ba59ce599eb",
+    "1-ui-ux/src/app/components/monitoring/ActivityObservationReview.tsx": "c6cabae1170f6d7482843d0058cc3791d33e6dbc030090115817b988de237a3a",
+    "1-ui-ux/src/app/components/monitoring/CareRecordPanel.tsx": "d403122e5c2d293f856d77bf3efb53c89129e1d91b523ad69315137590d53b9e",
+    "1-ui-ux/src/app/components/MedicationReminderPanel.tsx": "167d2a3d48eac06ff79e43ba5569ac5f0d6167768da23938498ad11e98ebc85c",
+    "1-ui-ux/src/app/services/monitoringApi.ts": "b93ee45673cc05ffe178549b52b13334402ce42911fcb8a0bcca83f7bb9f25a1",
+    "1-ui-ux/src/app/services/medicationSchedulesApi.ts": "8f4d1e0174e504b4459b10d5b8a06cfa92db087caba2800728d6cc3c36c149e9",
+    "1-ui-ux/tests/monitoring-ui.test.cjs": "3131308777754e36da496a3068d09943cb9c244f78428c4f325bd92c2889b509",
+    "4-system-engine/api/monitoringService.js": "025cd39557baebaf5c92ac3e51a572dff7dcc54c809edff2e6f158d44f6b7714",
+    "4-system-engine/api/behaviorAnomalies.js": "554e3ec8e98745ce205d87f96a75f2f1f7356fd284786aee47f01891bb1af89f",
+    "4-system-engine/api/routes/monitoring.js": "4f095f52d17eda051eb791b526e811a493cec98dde562b2705894905deba0cdd",
+    "4-system-engine/api/medicationScheduling.js": "0d38380bc6c0b2dc5d43577d8823616b39a06ff0595b8b8ca776bab77813d321",
+    "4-system-engine/api/notificationService.js": "760b66a75423c1d858a0c12712a4d98dcade625b9bf63f486fff4b7936f0e51d",
+    "4-system-engine/api/routes/reminders.js": "879d7bb4806cd984fbe89ba9d1bf671579f4a90f693d2af900e8703f8b5130e7",
+    "4-system-engine/api/routes/medicationEvents.js": "65ed45f579e3858b5863a14e808d1415512a175622ace9de768565ff42276d68",
+    "4-system-engine/api/tests/monitoring.test.mjs": "523566f7c3424eda07f96ed49c01521d670d0514a775a39f10687d0bdc8c08c4",
+    "4-system-engine/api/tests/monitoring.mysql.mjs": "a33fcd6b44cc3e1143f5dad6a57dff53a69b2157d2c86877a9ae8573fb72d5b8",
+    "4-system-engine/api/tests/notifications.test.mjs": "4318ddfc38ee9e10d50ac03ce9031981332a22e0dd5da4132489928003b10087",
+    "4-system-engine/api/tests/mobileNotifications.test.mjs": "16dd40f01bb0c582e70d94ab6147198cd8e38318ed474a1597d8c9b313732157",
+    "4-system-engine/api/tests/security.test.mjs": "7a49c43d6c7c4297eb0d7b9ce9a91fdd5d887ab8f1245286aeac0866f63d70d2",
+    "5-patient/src/pushNotifications.js": "6e7585c337dc8a6cbefbf70467766780e0cbb8b8644192ead31482f08189e8c9",
+    "6-caretaker/src/pushNotifications.js": "6e7585c337dc8a6cbefbf70467766780e0cbb8b8644192ead31482f08189e8c9",
+    "5-patient/src/components/DoseReminders.js": "593f40102f566ff74cdfa02fbd844813d9bf7ab2cc3a8596d54e5470787c87b8",
+    "6-caretaker/src/components/DoseReminders.js": "8be93a19ef2e1f2853d6095b4ee13d8fa9b8f65789de75e94c0fa1e6d9c3e499",
+    "6-caretaker/src/components/MonitoringIncidents.js": "ad5cf3e5dfdf2cda7cf3d93ee03895501b689c77c8b5a3325e106005d5a052bc",
+    "7-monitoring/edge/activity.py": "31dcca9f9cbb4695d5d87c657c518d2fbb7b9a97e3c8513c0ca658f94497e8bd",
+    "7-monitoring/edge/camera.py": "5e69be4d0da012a5e5525e29c3858008b8f2553d532149683fc7f29fa91baa54",
+    "7-monitoring/edge/worker.py": "e8ea80c4d8bd34fe694774d647544f0d06825d5fca3c45a48d24371e2c0e7f4e",
+    "7-monitoring/edge/storage.py": "cfbafcf001662de698dd9452640ea550cbc918ddad785d1b07e752ef588e4230",
+    "7-monitoring/research/train_activity.py": "d8cd7833e70821a0b4fd84c16f723008da261c78e8658143b6392ee8865cbf3e",
+    "7-monitoring/tests/test_edge.py": "34536d1fe2229d91deba39b2df6e81afa0c0c04e93ddc63811d2d26de9127a7f",
+    "package.json": "8b18f17254374f107c7ec6ed840b537f6edfaba9ab1bc46b5594483789a5b0a6",
+    "1-ui-ux/package-lock.json": "36bb39295aa170d63d6b0081da90489f002e6f4858020a0524b6dca2370d3cd0",
+    "4-system-engine/api/package-lock.json": "95a6ca7eb067f23fd24a713e0a3abc1f2f791f25fb836300ace73853b8ed6aa0",
+    "5-patient/package-lock.json": "4fa47671586ae523b4d81f5d3fc1d299a2519eeeff01ff771fe505e49b3c7c7c",
+    "6-caretaker/package-lock.json": "d0aca24ee37a715fc5554ad03a028af43a018df91cc58224f5b472880d8dd981",
+    "docs/research/completion-status.md": "86b7b0f14af858fa1ca020e27e24de2b90bebd537f0d3e8203df11b9a368a47c",
+    "docs/research/thesis-evidence-review.md": "c38e4dfee8046ba14b7f031ad383d0e98e3ae4002b751cda2a144267afea31f8"
+  },
+  "verificationLogSha256": {
+    "tmp/research-review/final-build.log": "6d400612d31f59a13490b316ab190d17ce8eb0484466e418f89cedc176f9a324",
+    "tmp/research-review/final-monitoring-ui.log": "00b643f63d0ef652f3f0edc40a75779ff6f28b78b54f286a8dfe0d3145406185",
+    "tmp/research-review/final-mysql.log": "a8624f9cda1f683ce9d098bb692c031acaf0d032e6f77e9ed12e8ac4ca07289b",
+    "tmp/research-review/final-regression.log": "53606d74c72bed8705813a96ca33362e8405032e0acf09e9f19bd6dfd4bb8b89",
+    "tmp/research-review/final-startup.log": "b6c547decb516f3876ed4e0e15918ddfa491ed04685b38a4c6647295969c8a1e",
+    "tmp/research-review/final-typecheck.log": "863e94b88befd5f64c9d5db99924300660f5d7fab2dc1abf785809792d2d8172",
+    "tmp/research-review/prescription-python.log": "094ef62465ea0016549ceffdb1e0b5f7858fe91d1d77d0477d5d42c907f91f8a"
+  }
+}

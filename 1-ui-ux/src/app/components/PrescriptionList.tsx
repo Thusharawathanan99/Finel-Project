@@ -23,7 +23,7 @@ export function PrescriptionList({ prescriptions, onDelete }: PrescriptionListPr
           <div className="flex items-start justify-between mb-3">
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-1">
-                <FileText className="w-4 h-4 text-blue-600" />
+                <FileText className="w-4 h-4 text-teal-600" />
                 <span className="font-medium">Prescription {prescription.prescriptionId}</span>
               </div>
               <div className="flex items-center gap-4 text-sm text-gray-600">
@@ -48,15 +48,46 @@ export function PrescriptionList({ prescriptions, onDelete }: PrescriptionListPr
           </div>
 
           <div className="mt-3 space-y-2">
-            <p className="text-sm font-medium text-gray-700">Medications:</p>
-            {prescription.medications.map((med, idx) => (
-              <div key={idx} className="pl-4 py-2 border-l-2 border-blue-200 bg-blue-50">
-                <p className="font-medium text-sm">{med.drugName}</p>
-                <p className="text-xs text-gray-600">
-                  Dosage: {med.dosage} • Frequency: {med.frequency}
-                </p>
-              </div>
-            ))}
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Prescribed Medications ({prescription.medications.length})</p>
+            {prescription.medications.map((med, idx) => {
+              const isNeedsReview = med.needsReview || med.dosage === 'Needs Review' || med.frequency === 'Needs Review';
+              return (
+                <div key={idx} className={`p-3 rounded-lg border ${
+                  isNeedsReview ? 'border-amber-200 bg-amber-50/50' : 'border-teal-100 bg-teal-50/40'
+                }`}>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="font-bold text-sm text-gray-900">{med.drugName}</p>
+                    {isNeedsReview && (
+                      <span className="text-[10px] font-bold bg-amber-200 text-amber-900 px-2 py-0.5 rounded-full">
+                        ⚠️ Needs Review
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-gray-600 mt-1">
+                    <div>
+                      <span className="text-gray-400 block text-[10px]">Dosage</span>
+                      <span className={med.dosage === 'Needs Review' ? 'text-amber-800 font-bold' : 'font-medium'}>{med.dosage}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-400 block text-[10px]">Frequency</span>
+                      <span className={med.frequency === 'Needs Review' ? 'text-amber-800 font-bold' : 'font-medium'}>{med.frequency}</span>
+                    </div>
+                    {med.duration && (
+                      <div>
+                        <span className="text-gray-400 block text-[10px]">Duration</span>
+                        <span>{med.duration}</span>
+                      </div>
+                    )}
+                    {med.instructions && (
+                      <div>
+                        <span className="text-gray-400 block text-[10px]">Instructions</span>
+                        <span>{med.instructions}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       ))}

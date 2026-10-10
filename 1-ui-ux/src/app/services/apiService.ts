@@ -1,13 +1,11 @@
 // Centralized HTTP client for the Express.js backend API
 // Automatically attaches Firebase Auth token to all requests
 import { getIdToken } from './firebaseAuthService';
+import { auth } from '../firebase';
+import type { FaceReport } from '../../../../shared/faceReport';
+import type { FaceProviderStatus } from '../../../../shared/faceProviderStatus';
 
-// Auto-detect: if served from Cloudflare tunnel, use the tunneled API;
-// otherwise use the local dev server.
-const isTunnel = typeof window !== 'undefined' && window.location.hostname.endsWith('.careconnect.website');
-const API_URL = isTunnel
-  ? 'https://api.careconnect.website/api'
-  : (import.meta.env.VITE_API_URL || 'http://localhost:3001/api');
+import { API_URL } from './apiConfig';
 
 interface RequestOptions {
   headers?: Record<string, string>;
@@ -37,13 +35,15 @@ async function buildHeaders(extraHeaders?: Record<string, string>): Promise<Reco
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+    let errorCode: string | undefined;
     try {
       const errorBody = await response.json();
       errorMessage = errorBody.error || errorBody.message || errorMessage;
+      errorCode = typeof errorBody.errorCode === 'string' ? errorBody.errorCode : undefined;
     } catch {
       // If response isn't JSON, use status text
     }
-    throw new Error(errorMessage);
+    throw Object.assign(new Error(errorMessage), { status: response.status, errorCode });
   }
 
   // Handle 204 No Content
@@ -58,47 +58,41 @@ async function handleResponse<T>(response: Response): Promise<T> {
 // HTTP Methods
 // ──────────────────────────────────────────────
 
-export async function apiGet<T>(endpoint: string, options?: RequestOptions): Promise<T> {
+async function apiRequest<T>(method: string, endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {
+  const uid = auth.currentUser?.uid;
+  const assertSession = () => {
+    if (auth.currentUser?.uid !== uid) throw new Error('Your signed-in account changed. Please try again.');
+  };
   const headers = await buildHeaders(options?.headers);
+  assertSession();
   const response = await fetch(`${API_URL}${endpoint}`, {
-    method: 'GET',
+    method,
     headers,
+    body: data !== undefined ? JSON.stringify(data) : undefined,
     signal: options?.signal,
   });
-  return handleResponse<T>(response);
+  assertSession();
+  try {
+    return await handleResponse<T>(response);
+  } finally {
+    assertSession();
+  }
+}
+
+export async function apiGet<T>(endpoint: string, options?: RequestOptions): Promise<T> {
+  return apiRequest<T>('GET', endpoint, undefined, options);
 }
 
 export async function apiPost<T>(endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {
-  const headers = await buildHeaders(options?.headers);
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    method: 'POST',
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
-    signal: options?.signal,
-  });
-  return handleResponse<T>(response);
+  return apiRequest<T>('POST', endpoint, data, options);
 }
 
 export async function apiPut<T>(endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {
-  const headers = await buildHeaders(options?.headers);
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    method: 'PUT',
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
-    signal: options?.signal,
-  });
-  return handleResponse<T>(response);
+  return apiRequest<T>('PUT', endpoint, data, options);
 }
 
 export async function apiDelete<T>(endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {
-  const headers = await buildHeaders(options?.headers);
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    method: 'DELETE',
-    headers,
-    body: data ? JSON.stringify(data) : undefined,
-    signal: options?.signal,
-  });
-  return handleResponse<T>(response);
+  return apiRequest<T>('DELETE', endpoint, data, options);
 }
 
 // ──────────────────────────────────────────────
@@ -132,8 +126,10 @@ export const prescriptionsApi = {
     residentId: string;
     dateIssued: string;
     doctorName: string;
+    patientName?: string;
+    rawText?: string;
     imageUrl?: string;
-    medications: { drugName: string; dosage: string; frequency: string }[];
+    medications: { drugName: string; dosage: string; frequency: string; duration?: string; instructions?: string; confidence?: number }[];
   }) => apiPost<any>('/prescriptions', data),
   delete: (prescriptionId: string) => apiDelete(`/prescriptions/${prescriptionId}`),
   finishMedication: (prescriptionId: string, data: { medicationId?: number; drugName?: string; dosage?: string; frequency?: string }) =>
@@ -154,6 +150,7 @@ export const caretakersApi = {
   getById: (id: string) => apiGet<any>(`/caretakers/${id}`),
   create: (data: any) => apiPost<any>('/caretakers', data),
   update: (id: string, data: any) => apiPut<any>(`/caretakers/${id}`, data),
+  delete: (id: string) => apiDelete(`/caretakers/${id}`),
   assignResident: (caretakerId: string, residentId: string) =>
     apiPost<any>(`/caretakers/${caretakerId}/assign-resident`, { residentId }),
   getLeaveRequests: (id: string) => apiGet<any[]>(`/caretakers/${id}/leave-requests`),
@@ -161,7 +158,7 @@ export const caretakersApi = {
   createLeaveRequest: (id: string, data: any) => apiPost<any>(`/caretakers/${id}/leave-requests`, data),
   updateLeaveRequest: (caretakerId: string, requestId: string, data: any) =>
     apiPut<any>(`/caretakers/${caretakerId}/leave-requests/${requestId}`, data),
-  reassignResident: (data: { residentId: string; fromCaretakerId?: string; toCaretakerId: string }) =>
+  reassignResident: (data: { residentId: string; fromCaretakerId?: string; toCaretakerId: string | null }) =>
     apiPut<any>('/caretakers/reassign-resident', data),
 };
 
@@ -176,6 +173,9 @@ export const appointmentsApi = {
 
 // --- Emotional States ---
 export const emotionsApi = {
+  faceStatus: (options?: RequestOptions) => apiGet<FaceProviderStatus>('/emotions/face-status', options),
+  getWellnessAlerts: (caretakerId?: string, options?: RequestOptions) => apiGet<any[]>(caretakerId ? `/emotions/wellness-alerts/${encodeURIComponent(caretakerId)}` : '/emotions/wellness-alerts', options),
+  acknowledgeWellness: (id: number, options?:RequestOptions) => apiPut<any>(`/emotions/wellness-alerts/${id}/acknowledge`, {}, options),
   getForResident: (residentId: string) => apiGet<any[]>(`/residents/${residentId}/emotions`),
   record: (data: {
     residentId: string;
@@ -184,13 +184,9 @@ export const emotionsApi = {
     category?: string;
     relatedMedicine?: string | null;
     note?: string | null;
+    observationId?: string;
   }) => apiPost<any>('/emotions', data),
-  analyzeImage: (base64Image: string) => apiPost<{
-    emotionLabel: string;
-    stateScore: number;
-    category: string;
-    note: string;
-  }>('/emotions/analyze-image', { image: base64Image }),
+  analyzeImage: (base64Image: string, options?: RequestOptions) => apiPost<FaceReport>('/emotions/analyze-image', { image: base64Image }, options),
   createWellnessAlert: (data: {
     residentId: string;
     emotionLabel: string;
@@ -200,9 +196,16 @@ export const emotionsApi = {
   }) => apiPost<any>('/emotions/wellness-alert', data),
 };
 
+export const medicationEventsApi = {
+  get: (residentId: string, day: string) => apiGet<any[]>(`/residents/${encodeURIComponent(residentId)}/medication-events?day=${encodeURIComponent(day)}`),
+  save: (residentId: string, medicationId: number, day: string, status: 'taken' | 'skipped') => apiPost<any>(`/residents/${encodeURIComponent(residentId)}/medication-events`, {medicationId,day,status}),
+};
+
 // --- System Components ---
 export const systemApi = {
   getComponents: () => apiGet<any[]>('/system/components'),
+  createComponent: (data: { componentId: string; name: string; version: string; description: string; status: string }) => apiPost<any>('/system/components', data),
+  deleteComponent: (id: string) => apiDelete(`/system/components/${id}`),
   updateComponent: (id: string, data: any) => apiPut<any>(`/system/components/${id}`, data),
 };
 
@@ -228,10 +231,11 @@ export const doctorsApi = {
 
 // --- SOS Alerts ---
 export const sosApi = {
-  getActive: () => apiGet<any[]>('/sos-alerts'),
+  create: (data: { residentId: string; residentName?: string; message: string; requestId?:string }, options?:RequestOptions) => apiPost<{ alertId: number; cooldown?: boolean; saved?:boolean; replayed?:boolean; isResolved?:boolean }>('/sos-alerts', data, options),
+  getActive: (options?:RequestOptions) => apiGet<any[]>('/sos-alerts', options),
   getAll: () => apiGet<any[]>('/sos-alerts?all=true'),
-  resolve: (id: number, resolvedBy?: string) =>
-    apiPut<any>(`/sos-alerts/${id}/resolve`, { resolvedBy: resolvedBy || 'Admin' }),
+  resolve: (id: number, resolvedBy?: string, options?:RequestOptions) =>
+    apiPut<any>(`/sos-alerts/${id}/resolve`, { resolvedBy: resolvedBy || 'Admin' }, options),
 };
 
 // --- Complaints ---

@@ -1,0 +1,14 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Trusted server sends generic invalidation signals to SQL-authorized users.
+    match /users/{uid}/care_updates/{update} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+    match /storage_access/{uid}/residents/{residentId} {
+      allow read, write: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

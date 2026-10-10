@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS prescriptions (
   resident_id VARCHAR(50) NOT NULL,
   date_issued DATE NOT NULL,
   doctor_name VARCHAR(255) DEFAULT NULL,
+  patient_name VARCHAR(255) DEFAULT NULL,
+  raw_text TEXT DEFAULT NULL,
+  request_hash CHAR(64) DEFAULT NULL,
   image_url TEXT DEFAULT NULL COMMENT 'Firebase Storage download URL',
   image_path TEXT DEFAULT NULL COMMENT 'Firebase Storage path for deletion',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -71,6 +74,17 @@ CREATE TABLE IF NOT EXISTS medications (
   drug_name VARCHAR(255) NOT NULL,
   dosage VARCHAR(100) DEFAULT NULL,
   frequency VARCHAR(255) DEFAULT NULL,
+  duration VARCHAR(100) DEFAULT NULL,
+  instructions TEXT DEFAULT NULL,
+  confidence FLOAT DEFAULT NULL,
+  needs_review BOOLEAN NOT NULL DEFAULT TRUE,
+  review_reasons JSON DEFAULT NULL,
+  evidence JSON DEFAULT NULL,
+  source VARCHAR(100) DEFAULT NULL,
+  route VARCHAR(100) DEFAULT NULL,
+  confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+  confirmed_by_uid VARCHAR(128) DEFAULT NULL,
+  confirmed_at TIMESTAMP NULL DEFAULT NULL,
   FOREIGN KEY (prescription_id) REFERENCES prescriptions(prescription_id) ON DELETE CASCADE
 );
 
@@ -80,13 +94,13 @@ CREATE TABLE IF NOT EXISTS medications (
 CREATE TABLE IF NOT EXISTS finished_medications (
   id INT AUTO_INCREMENT PRIMARY KEY,
   resident_id VARCHAR(50) NOT NULL,
-  prescription_id VARCHAR(50) NOT NULL,
+  prescription_id VARCHAR(50) DEFAULT NULL,
   drug_name VARCHAR(255) NOT NULL,
   dosage VARCHAR(100) DEFAULT NULL,
   frequency VARCHAR(255) DEFAULT NULL,
   finished_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
-  FOREIGN KEY (prescription_id) REFERENCES prescriptions(prescription_id) ON DELETE CASCADE,
+  FOREIGN KEY (prescription_id) REFERENCES prescriptions(prescription_id) ON DELETE SET NULL,
   INDEX idx_finished_resident_time (resident_id, finished_at)
 );
 
@@ -144,7 +158,11 @@ CREATE TABLE IF NOT EXISTS emotional_states (
   category ENUM('positive', 'neutral', 'negative', 'side-effect') DEFAULT NULL,
   related_medicine VARCHAR(255) DEFAULT NULL COMMENT 'Drug name if emotion is medicine-related',
   note TEXT DEFAULT NULL COMMENT 'Optional note from the resident',
+  observation_id VARCHAR(80) DEFAULT NULL,
+  observation_hash CHAR(64) DEFAULT NULL,
+  wellness_alert_id INT DEFAULT NULL,
   recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_emotion_observation (resident_id, observation_id),
   FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
   INDEX idx_resident_time (resident_id, recorded_at)
 );
@@ -225,6 +243,7 @@ CREATE TABLE IF NOT EXISTS wellness_alerts (
   severity ENUM('info', 'warning', 'critical') DEFAULT 'info',
   acknowledged BOOLEAN DEFAULT FALSE,
   acknowledged_by VARCHAR(255),
+  acknowledged_by_uid VARCHAR(128) DEFAULT NULL,
   acknowledged_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
@@ -339,4 +358,242 @@ CREATE TABLE IF NOT EXISTS complaints (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
   INDEX idx_complaint_status (status, created_at)
+);
+
+-- ──────────────────────────────────────────────
+-- Notifications (Patient in-app notification center)
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notifications (
+  notification_id INT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  message TEXT,
+  type VARCHAR(50) DEFAULT 'general',
+  is_read BOOLEAN DEFAULT FALSE,
+  related_id VARCHAR(100),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+  INDEX idx_notif_resident (resident_id, is_read)
+);
+
+-- ──────────────────────────────────────────────
+-- SOS Alerts (Emergency alerts triggered by residents/caretakers)
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sos_alerts (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  resident_name VARCHAR(100),
+  message TEXT,
+  requested_by_uid VARCHAR(128) DEFAULT NULL,
+  request_id CHAR(36) DEFAULT NULL,
+  request_hash CHAR(64) DEFAULT NULL,
+  is_resolved BOOLEAN DEFAULT FALSE,
+  resolved_by VARCHAR(255),
+  resolved_by_uid VARCHAR(128) DEFAULT NULL,
+  resolved_at DATETIME,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_sos_unresolved (is_resolved, created_at),
+  UNIQUE KEY uq_sos_request (requested_by_uid, request_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS medication_events (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  medication_id INT NOT NULL,
+  event_day DATE NOT NULL,
+  status ENUM('taken', 'skipped') NOT NULL,
+  recorded_by_uid VARCHAR(128) NOT NULL,
+  recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_medication_event (resident_id, medication_id, event_day),
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE
+);
+
+-- Monitoring consent is append-only so a grant/withdrawal history is retained.
+-- An activity event is accepted only when the latest non-expired record grants
+-- the relevant scope. Raw camera frames are never stored in these tables.
+CREATE TABLE IF NOT EXISTS monitoring_consents (
+  consent_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  scope ENUM('camera', 'activity', 'emotion', 'research') NOT NULL,
+  status ENUM('granted', 'withdrawn') NOT NULL,
+  granted_by_uid VARCHAR(128) NOT NULL,
+  subject_role ENUM('resident', 'guardian', 'administrator') NOT NULL DEFAULT 'resident',
+  guardian_name VARCHAR(255) DEFAULT NULL,
+  language ENUM('en', 'ta', 'si') NOT NULL DEFAULT 'en',
+  consent_version VARCHAR(40) NOT NULL DEFAULT 'monitoring-v1',
+  notes VARCHAR(1000) DEFAULT NULL,
+  effective_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+  INDEX idx_monitoring_consent_current (resident_id, scope, effective_at)
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_devices (
+  device_id VARCHAR(64) PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  device_type ENUM('browser_camera', 'ip_camera', 'raspberry_pi', 'jetson', 'simulator') NOT NULL,
+  location VARCHAR(255) DEFAULT NULL,
+  room_number VARCHAR(50) DEFAULT NULL,
+  status ENUM('online', 'offline', 'maintenance', 'disabled') NOT NULL DEFAULT 'offline',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  camera_state ENUM('running','paused','stopped') NOT NULL DEFAULT 'stopped',
+  token_hash CHAR(64) DEFAULT NULL,
+  token_rotated_at TIMESTAMP NULL DEFAULT NULL,
+  last_seen_at TIMESTAMP NULL DEFAULT NULL,
+  capabilities JSON DEFAULT NULL,
+  settings JSON DEFAULT NULL,
+  last_health JSON DEFAULT NULL,
+  created_by_uid VARCHAR(128) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_monitoring_device_token (token_hash),
+  INDEX idx_monitoring_device_status (enabled, status, last_seen_at)
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_device_residents (
+  device_id VARCHAR(64) NOT NULL,
+  resident_id VARCHAR(50) NOT NULL,
+  assigned_by_uid VARCHAR(128) NOT NULL,
+  assigned_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  unassigned_at TIMESTAMP NULL DEFAULT NULL,
+  PRIMARY KEY (device_id, resident_id, assigned_at),
+  FOREIGN KEY (device_id) REFERENCES monitoring_devices(device_id) ON DELETE CASCADE,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+  INDEX idx_monitoring_assignment_active (device_id, unassigned_at),
+  INDEX idx_monitoring_assignment_resident (resident_id, unassigned_at)
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_zones (
+  zone_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  device_id VARCHAR(64) NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  zone_type ENUM('normal', 'restricted', 'bed', 'exit') NOT NULL DEFAULT 'normal',
+  polygon JSON NOT NULL COMMENT 'Normalized x/y polygon; no image is retained',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_uid VARCHAR(128) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (device_id) REFERENCES monitoring_devices(device_id) ON DELETE CASCADE,
+  INDEX idx_monitoring_zone_device (device_id, enabled)
+);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+  event_id CHAR(36) PRIMARY KEY,
+  device_id VARCHAR(64) NOT NULL,
+  resident_id VARCHAR(50) DEFAULT NULL,
+  request_id VARCHAR(80) NOT NULL,
+  request_hash CHAR(64) DEFAULT NULL,
+  activity ENUM('walking', 'sitting', 'standing', 'lying', 'resting', 'inactivity', 'wandering', 'collapse', 'fall', 'abnormal_movement', 'restricted_entry', 'unknown') NOT NULL,
+  confidence DECIMAL(5,4) NOT NULL,
+  observed_at DATETIME(3) NOT NULL,
+  ended_at DATETIME(3) DEFAULT NULL,
+  duration_ms INT UNSIGNED DEFAULT NULL,
+  model_version VARCHAR(80) NOT NULL,
+  evidence JSON DEFAULT NULL COMMENT 'Pose-derived measurements only; never raw video',
+  review_status ENUM('pending', 'confirmed', 'false_positive') NOT NULL DEFAULT 'pending',
+  reviewed_by_uid VARCHAR(128) DEFAULT NULL,
+  reviewed_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (device_id) REFERENCES monitoring_devices(device_id) ON DELETE RESTRICT,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE SET NULL,
+  UNIQUE KEY uq_activity_device_request (device_id, request_id),
+  INDEX idx_activity_resident_time (resident_id, observed_at),
+  INDEX idx_activity_type_time (activity, observed_at)
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_incidents (
+  incident_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  event_id CHAR(36) DEFAULT NULL,
+  resident_id VARCHAR(50) DEFAULT NULL,
+  device_id VARCHAR(64) NOT NULL,
+  incident_type ENUM('fall', 'collapse', 'prolonged_inactivity', 'wandering', 'restricted_entry', 'abnormal_movement', 'device_offline', 'combined_risk') NOT NULL,
+  severity ENUM('info', 'warning', 'critical') NOT NULL,
+  status ENUM('open', 'acknowledged', 'false_alarm', 'resolved') NOT NULL DEFAULT 'open',
+  reason VARCHAR(1000) NOT NULL,
+  confidence DECIMAL(5,4) DEFAULT NULL,
+  recommended_action VARCHAR(1000) NOT NULL,
+  detected_at DATETIME(3) NOT NULL,
+  acknowledged_by_uid VARCHAR(128) DEFAULT NULL,
+  acknowledged_at DATETIME(3) DEFAULT NULL,
+  emergency_contacted_at DATETIME(3) DEFAULT NULL,
+  resolved_by_uid VARCHAR(128) DEFAULT NULL,
+  resolved_at DATETIME(3) DEFAULT NULL,
+  resolution_notes VARCHAR(2000) DEFAULT NULL,
+  corrected_resident_id VARCHAR(50) DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (event_id) REFERENCES activity_events(event_id) ON DELETE SET NULL,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE SET NULL,
+  FOREIGN KEY (corrected_resident_id) REFERENCES residents(resident_id) ON DELETE SET NULL,
+  FOREIGN KEY (device_id) REFERENCES monitoring_devices(device_id) ON DELETE RESTRICT,
+  UNIQUE KEY uq_monitoring_incident_event (event_id),
+  INDEX idx_monitoring_incident_status (status, severity, detected_at),
+  INDEX idx_monitoring_incident_resident (resident_id, detected_at)
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_incident_actions (
+  action_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  incident_id BIGINT NOT NULL,
+  action ENUM('acknowledged', 'emergency_contacted', 'false_alarm', 'resolved', 'resident_corrected', 'note') NOT NULL,
+  actor_uid VARCHAR(128) NOT NULL,
+  notes VARCHAR(2000) DEFAULT NULL,
+  metadata JSON DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (incident_id) REFERENCES monitoring_incidents(incident_id) ON DELETE CASCADE,
+  INDEX idx_monitoring_action_incident (incident_id, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS activity_baselines (
+  resident_id VARCHAR(50) PRIMARY KEY,
+  baseline JSON NOT NULL,
+  sample_count INT UNSIGNED NOT NULL DEFAULT 0,
+  computed_from DATETIME(3) DEFAULT NULL,
+  computed_to DATETIME(3) DEFAULT NULL,
+  model_version VARCHAR(80) NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_device_health (
+  health_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  device_id VARCHAR(64) NOT NULL,
+  captured_at DATETIME(3) NOT NULL,
+  cpu_percent DECIMAL(5,2) DEFAULT NULL,
+  memory_percent DECIMAL(5,2) DEFAULT NULL,
+  temperature_c DECIMAL(5,2) DEFAULT NULL,
+  camera_available BOOLEAN NOT NULL,
+  queue_depth INT UNSIGNED NOT NULL DEFAULT 0,
+  software_version VARCHAR(80) DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (device_id) REFERENCES monitoring_devices(device_id) ON DELETE CASCADE,
+  INDEX idx_monitoring_health_device (device_id, captured_at)
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  audit_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  actor_type ENUM('user', 'device', 'system') NOT NULL,
+  actor_id VARCHAR(128) NOT NULL,
+  action VARCHAR(100) NOT NULL,
+  resource_type VARCHAR(80) NOT NULL,
+  resource_id VARCHAR(128) DEFAULT NULL,
+  resident_id VARCHAR(50) DEFAULT NULL,
+  details JSON DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_audit_resident_time (resident_id, created_at),
+  INDEX idx_audit_resource (resource_type, resource_id, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version VARCHAR(100) PRIMARY KEY,
+  applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS care_notes (
+  note_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  resident_id VARCHAR(50) NOT NULL,
+  note VARCHAR(4000) NOT NULL,
+  recorded_by_uid VARCHAR(128) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (resident_id) REFERENCES residents(resident_id) ON DELETE CASCADE,
+  INDEX idx_care_note_resident (resident_id,created_at)
 );

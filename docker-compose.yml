@@ -1,4 +1,3 @@
-version: "3.9"
 
 # ─────────────────────────────────────────────
 # Named volumes for persistent storage
@@ -14,6 +13,10 @@ networks:
   careconnect_net:
     driver: bridge
 
+secrets:
+  firebase_service_account:
+    file: ${FIREBASE_SERVICE_ACCOUNT_KEY:?Set FIREBASE_SERVICE_ACCOUNT_KEY to a local JSON file path}
+
 # ─────────────────────────────────────────────
 # Services
 # ─────────────────────────────────────────────
@@ -25,20 +28,36 @@ services:
     container_name: careconnect_mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-root}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?Set a database password in .env}
       MYSQL_DATABASE:      ${MYSQL_DATABASE:-careconnect}
     volumes:
       - mysql_data:/var/lib/mysql                          # persistent DB files
-      - ./4-system-engine/api/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro  # auto-init schema
     networks:
       - careconnect_net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-root}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # ── 2. Node.js Express API ──────────────────
+  db-setup:
+    build:
+      context: ./4-system-engine/api
+      dockerfile: Dockerfile
+    command: ["node", "setup_db.js", "--migrate", "--confirm"]
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set a database password in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-careconnect}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - careconnect_net
+
   api:
     build:
       context: ./4-system-engine/api
@@ -52,14 +71,34 @@ services:
       MYSQL_HOST:     mysql    # service-name DNS (not localhost!)
       MYSQL_PORT:     3306
       MYSQL_USER:     root
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set a database password in .env}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-careconnect}
-      FIREBASE_SERVICE_ACCOUNT_KEY: ${FIREBASE_SERVICE_ACCOUNT_KEY}
-      GEMINI_API_KEY: ${VITE_GEMINI_API_KEY}
+      FIREBASE_SERVICE_ACCOUNT_KEY: /run/secrets/firebase_service_account
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GOOGLE_CLOUD_PROJECT_ID: ${GOOGLE_CLOUD_PROJECT_ID:-}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS to the deployed web origin(s)}
       DONUT_API_URL:  http://donut:8000   # internal networking
+      DONUT_INTERNAL_TOKEN: ${DONUT_INTERNAL_TOKEN:?Set a private token for the internal prescription service}
+      PUSH_NOTIFICATIONS_ENABLED: ${PUSH_NOTIFICATIONS_ENABLED:-false}
+      EXPO_PUSH_PROJECT_IDS: ${EXPO_PUSH_PROJECT_IDS:-}
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
+      MEDICATION_ESCALATION_MINUTES: ${MEDICATION_ESCALATION_MINUTES:-30}
+      NOTIFICATION_WORKER_INTERVAL_MS: ${NOTIFICATION_WORKER_INTERVAL_MS:-15000}
+      MONITORING_RETENTION_DAYS: ${MONITORING_RETENTION_DAYS:-30}
+    secrets:
+      - firebase_service_account
     depends_on:
       mysql:
         condition: service_healthy      # wait for DB to be ready
+      db-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks:
       - careconnect_net
 
@@ -70,15 +109,16 @@ services:
       dockerfile: Dockerfile
     container_name: careconnect_donut
     restart: unless-stopped
-    ports:
-      - "8000:8000"            # expose for direct frontend access
+    expose:
+      - "8000"                # reachable only on the private service network
     volumes:
-      - model_cache:/root/.cache/huggingface   # reuse downloaded weights
+      - model_cache:/home/donut/.cache/huggingface   # reuse downloaded weights
       # Mount your fine-tuned model if stored locally:
       # - ./3-prescription-reader/best_model:/app/best_model:ro
     environment:
       PYTHONUNBUFFERED: "1"
-      GEMINI_API_KEY:   ${VITE_GEMINI_API_KEY}
+      GEMINI_API_KEY:   ${GEMINI_API_KEY}
+      DONUT_INTERNAL_TOKEN: ${DONUT_INTERNAL_TOKEN:?Set a private token for the internal prescription service}
     networks:
       - careconnect_net
     # GPU support — uncomment if you have an NVIDIA GPU + nvidia-container-toolkit

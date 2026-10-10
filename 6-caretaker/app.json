@@ -21,17 +21,21 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.careconnect.caretaker"
+      "package": "com.careconnect.caretaker",
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      "expo-notifications"
     ],
     "extra": {
       "eas": {
-        "projectId": "63268a74-6c82-4b12-bfba-f5a64847251d"
+        "projectId": "377d9a45-093d-42b4-b453-62b2b512e1fd"
       }
     }
   }

@@ -1,0 +1,19 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function authorized(residentId) {
+      return request.auth != null && firestore.exists(/databases/(default)/documents/storage_access/$(request.auth.uid)/residents/$(residentId)) &&
+        firestore.get(/databases/(default)/documents/storage_access/$(request.auth.uid)/residents/$(residentId)).data.expiresAt > request.time &&
+        firestore.get(/databases/(default)/documents/storage_access/$(request.auth.uid)/residents/$(residentId)).data.role in ['patient','caretaker'];
+    }
+    match /prescriptions/{residentId}/{filename} {
+      allow read: if authorized(residentId);
+      allow create: if authorized(residentId) && request.resource.size < 10 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)') &&
+        request.resource.metadata.residentId == residentId && request.resource.metadata.uploadedByUid == request.auth.uid;
+      allow delete: if authorized(residentId) && resource.metadata.uploadedByUid == request.auth.uid;
+      allow update: if false;
+    }
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}

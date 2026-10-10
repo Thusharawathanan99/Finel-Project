@@ -6,14 +6,14 @@
 /**
  * System prompt that establishes Gemini as a clinical nutritionist.
  */
-export const MEAL_PLAN_SYSTEM_PROMPT = `You are a certified clinical nutritionist and registered dietitian with expertise in drug-food interactions and therapeutic nutrition. You create personalized meal plans for healthcare facility residents.
+export const MEAL_PLAN_SYSTEM_PROMPT = `Suggest meal options for review by caregivers and clinicians. Do not claim medical certification. You create personalized meal plans for healthcare facility residents.
 
 KEY PRINCIPLES:
 1. SAFETY FIRST — Never suggest foods that have dangerous interactions with the patient's medications
 2. Consider the patient's age, medical conditions, and allergies when planning meals
 3. Ensure adequate caloric intake appropriate for the patient's age and condition
 4. Balance macronutrients (protein, carbs, fats) across all meals
-5. Infer the patient's likely underlying medical conditions (e.g. Hypertension, Glaucoma, Diabetes) from their list of active medications, and explicitly state these inferred conditions in your dietaryNotes.
+5. Use only supplied medical history; do not infer or diagnose diseases from medication names. Ingredient and nutrient estimates require professional verification.
 6. Include culturally diverse options that are practical for institutional meal preparation
 7. Provide clear rationale for each food choice, especially medication-related considerations
 
@@ -55,7 +55,7 @@ export function buildMealPlanPrompt(context: {
 
   const calories = context.calorieTarget || 2000;
 
-  return `Generate a concise 3-day meal plan (e.g., Monday, Tuesday, Wednesday) for the following patient:
+  return `Generate a complete 7-day meal plan (Monday through Sunday, every day exactly once) for the following patient:
 
 PATIENT PROFILE:
 - Name: ${context.name}
@@ -77,6 +77,7 @@ Generate a JSON response with this EXACT structure (no extra text, just JSON):
       "breakfast": {
         "name": "Oatmeal with Berries",
         "description": "Steel-cut oats topped with fresh blueberries and a drizzle of honey",
+        "ingredients": ["steel-cut oats", "blueberries", "honey"],
         "calories": 320,
         "protein": 10,
         "carbs": 55,
@@ -96,7 +97,7 @@ Generate a JSON response with this EXACT structure (no extra text, just JSON):
       "totalFat": 65
     }
   ],
-  "dietaryNotes": "Inferred Conditions: [List deduced diseases from medications]. Overall guidance for this patient's nutritional needs...",
+  "dietaryNotes": "Guidance based only on the supplied medical history. Verify ingredients and estimated nutrients before use.",
   "medicationConsiderations": [
     "Avoid grapefruit due to Atorvastatin interaction",
     "Low-sodium meals due to Lisinopril for blood pressure management"
@@ -117,7 +118,10 @@ export function buildMealRegenerationPrompt(
   currentMeal: string,
   medications: string[],
   allergies: string[],
-  reason?: string
+  reason?: string,
+  dietaryRestrictions: string[] = [],
+  medicalHistory: string = '',
+  calorieTarget: number = 2000
 ): string {
   return `The patient wants an alternative ${mealType} for ${day}. 
 Current meal is: ${currentMeal}
@@ -125,11 +129,16 @@ ${reason ? `Reason for change: ${reason}` : ''}
 
 Medications: ${medications.join(', ') || 'None'}
 Allergies: ${allergies.join(', ') || 'None'}
+Dietary restrictions: ${dietaryRestrictions.join(', ') || 'None'}
+Supplied medical history: ${medicalHistory || 'Not specified'}
+Daily calorie target: ${calorieTarget}
+Do not add any declared allergen or food excluded by these restrictions.
 
 Generate a SINGLE replacement meal item as JSON:
 {
   "name": "...",
   "description": "...",
+  "ingredients": ["list every ingredient"],
   "calories": ...,
   "protein": ...,
   "carbs": ...,

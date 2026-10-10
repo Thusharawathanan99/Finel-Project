@@ -1,321 +1,130 @@
-/**
- * Model Accuracy Tracker
- * 
- * Tracks per-model accuracy metrics for the ensemble system.
- * Persists to localStorage so metrics survive page refreshes.
- * 
- * Used by:
- *  - EnsembleOrchestrator: records predictions
- *  - PrescriptionUpload: called when user confirms/corrects results
- *  - PatientDashboard: displays accuracy comparison charts
- */
-
-import { ModelSource, EnsembleMedication } from './EnsembleOrchestrator';
-
-// ─────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────
-
+import type { ModelSource, EnsembleMedication } from './EnsembleOrchestrator';
+import type { CandidateSourceEvidence } from '../../../../../4-system-engine/api/routes/prescriptionSafety.js';
 export interface ModelMetrics {
-  totalPredictions: number;
-  correctPredictions: number;
-  accuracy: number;             // correctPredictions / totalPredictions
-  totalMedicationsFound: number;
-  averageConfidence: number;
-  lastUpdated: string;
+  totalPredictions:number; correctPredictions:number; accuracy:number;
+  totalMedicationsFound:number; averageConfidence:number; lastUpdated:string;
 }
-
 export interface AccuracySnapshot {
-  donut: ModelMetrics;
-  regex: ModelMetrics;
-  gemini: ModelMetrics;
-  ensemble: ModelMetrics;
-  totalPrescriptions: number;
-  modelAgreementRate: number;
-  lastUpdated: string;
+  donut:ModelMetrics; regex:ModelMetrics; gemini:ModelMetrics; ensemble:ModelMetrics;
+  totalPrescriptions:number; modelAgreementRate:number; lastUpdated:string;
 }
-
+type Regimen = {drugName:string; dosage:string; frequency?:string; duration?:string; instructions?:string};
 interface PredictionRecord {
-  id: string;
-  timestamp: string;
-  medications: {
-    drugName: string;
-    dosage: string;
-    sources: ModelSource[];
-    confidence: number;
-  }[];
-  wasConfirmed: boolean;
-  wasCorrected: boolean;
-  correctMedications?: string[];  // Ground truth after user correction
+  id:string; timestamp:string; medications:(Regimen & {sources:ModelSource[];confidence:number;
+    sourceDetails?:Partial<Record<ModelSource,CandidateSourceEvidence>>})[];
+  wasConfirmed:boolean; wasCorrected:boolean; correctMedications?:Regimen[];
+  invokedSources:ModelSource[];
 }
-
-// ─────────────────────────────────────────────
-// Tracker Class
-// ─────────────────────────────────────────────
-
-const STORAGE_KEY = 'careconnect_model_accuracy';
-const MAX_HISTORY = 200;  // Keep last 200 predictions for rolling accuracy
-
+const sources = ['donut','regex','gemini','ensemble'] as const;
+const normalize = (value:unknown) => String(value||'').toLowerCase().replace(/\s+/g,'');
+const equal = (left:Regimen,right:Regimen) => ['drugName','dosage','frequency','duration','instructions']
+  .every(field=>normalize(left[field as keyof Regimen])===normalize(right[field as keyof Regimen]));
+const clean = (item:Regimen):Regimen => ({drugName:item.drugName,dosage:item.dosage,
+  frequency:item.frequency||'',duration:item.duration||'',instructions:item.instructions||''});
 class ModelAccuracyTracker {
-  private predictions: PredictionRecord[] = [];
-  private metrics: AccuracySnapshot;
-
-  constructor() {
-    this.metrics = this.getDefaultMetrics();
-    this.loadFromStorage();
+  private predictions:PredictionRecord[]=[];
+  private scope:string|null=null;
+  private scopeGeneration=0;
+  getScopeToken():number { return this.scopeGeneration; }
+  private baseline=this.defaults();
+  private metrics=this.defaults();
+  private get key(){return this.scope?'careconnect_accuracy_v3:'+encodeURIComponent(this.scope):null;}
+  private defaults():AccuracySnapshot {
+    const model=()=>({totalPredictions:0,correctPredictions:0,accuracy:0,totalMedicationsFound:0,
+      averageConfidence:0,lastUpdated:new Date().toISOString()});
+    return {donut:model(),regex:model(),gemini:model(),ensemble:model(),totalPrescriptions:0,
+      modelAgreementRate:0,lastUpdated:new Date().toISOString()};
   }
-
-  // ─── Recording ────────────────────────────
-
-  /**
-   * Record a new ensemble prediction.
-   * Called by EnsembleOrchestrator after merging results.
-   */
-  recordPrediction(medications: EnsembleMedication[]): string {
-    const id = `pred-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
-
-    const record: PredictionRecord = {
-      id,
-      timestamp: new Date().toISOString(),
-      medications: medications.map(m => ({
-        drugName: m.medication.drugName,
-        dosage: m.medication.dosage,
-        sources: m.sources,
-        confidence: m.confidence,
-      })),
-      wasConfirmed: false,
-      wasCorrected: false,
-    };
-
-    this.predictions.push(record);
-
-    // Update per-model counts
-    for (const med of medications) {
-      for (const source of med.sources) {
-        this.incrementModelCount(source, 'totalMedicationsFound', 1);
-        this.addConfidence(source, med.confidence);
-      }
-    }
-
-    this.metrics.totalPrescriptions++;
-    this.updateEnsembleMetrics(medications);
-    this.trimHistory();
-    this.saveToStorage();
-
-    return id;
-  }
-
-  /**
-   * Mark a prediction as confirmed by the user (user accepted the results).
-   * This counts as "correct" for all models that found those medications.
-   */
-  confirmPrediction(predictionId: string): void {
-    const record = this.predictions.find(p => p.id === predictionId);
-    if (!record || record.wasConfirmed) return;
-
-    record.wasConfirmed = true;
-
-    for (const med of record.medications) {
-      for (const source of med.sources) {
-        this.incrementModelCount(source, 'totalPredictions', 1);
-        this.incrementModelCount(source, 'correctPredictions', 1);
-      }
-    }
-
-    this.recalculateAccuracies();
-    this.saveToStorage();
-  }
-
-  /**
-   * Record a correction — user changed the results.
-   * Models that had the correct answer get credit; others don't.
-   */
-  recordCorrection(
-    predictionId: string,
-    correctMedications: { drugName: string; dosage: string }[]
-  ): void {
-    const record = this.predictions.find(p => p.id === predictionId);
-    if (!record) return;
-
-    record.wasCorrected = true;
-    record.correctMedications = correctMedications.map(m => m.drugName.toLowerCase());
-
-    const correctNames = new Set(record.correctMedications);
-
-    for (const med of record.medications) {
-      const wasCorrect = correctNames.has(med.drugName.toLowerCase());
-      for (const source of med.sources) {
-        this.incrementModelCount(source, 'totalPredictions', 1);
-        if (wasCorrect) {
-          this.incrementModelCount(source, 'correctPredictions', 1);
-        }
-      }
-    }
-
-    this.recalculateAccuracies();
-    this.saveToStorage();
-  }
-
-  // ─── Getters ──────────────────────────────
-
-  /**
-   * Get current accuracy snapshot for all models.
-   */
-  getMetrics(): AccuracySnapshot {
-    return { ...this.metrics };
-  }
-
-  /**
-   * Get metrics for a specific model.
-   */
-  getModelMetrics(source: ModelSource): ModelMetrics {
-    return { ...this.metrics[source] };
-  }
-
-  /**
-   * Get the last N prediction records for display.
-   */
-  getRecentPredictions(count: number = 10): PredictionRecord[] {
-    return this.predictions.slice(-count).reverse();
-  }
-
-  /**
-   * Get total prescription count.
-   */
-  getTotalPrescriptions(): number {
-    return this.metrics.totalPrescriptions;
-  }
-
-  /**
-   * Export metrics as JSON (for research).
-   */
-  exportMetrics(): string {
-    return JSON.stringify({
-      exportedAt: new Date().toISOString(),
-      metrics: this.metrics,
-      recentPredictions: this.predictions.slice(-50),
-    }, null, 2);
-  }
-
-  /**
-   * Reset all metrics.
-   */
-  reset(): void {
-    this.predictions = [];
-    this.metrics = this.getDefaultMetrics();
-    this.saveToStorage();
-  }
-
-  // ─── Internal ─────────────────────────────
-
-  private incrementModelCount(
-    source: ModelSource,
-    field: 'totalPredictions' | 'correctPredictions' | 'totalMedicationsFound',
-    amount: number
-  ): void {
-    this.metrics[source][field] += amount;
-    this.metrics.lastUpdated = new Date().toISOString();
-  }
-
-  private addConfidence(source: ModelSource, confidence: number): void {
-    const m = this.metrics[source];
-    // Running average
-    const total = m.totalMedicationsFound || 1;
-    m.averageConfidence = (m.averageConfidence * (total - 1) + confidence) / total;
-  }
-
-  private updateEnsembleMetrics(medications: EnsembleMedication[]): void {
-    this.metrics.ensemble.totalMedicationsFound += medications.length;
-
-    if (medications.length > 0) {
-      const avgConf = medications.reduce((s, m) => s + m.confidence, 0) / medications.length;
-      const total = this.metrics.ensemble.totalMedicationsFound || 1;
-      this.metrics.ensemble.averageConfidence =
-        (this.metrics.ensemble.averageConfidence * (total - medications.length) + avgConf * medications.length) / total;
-    }
-
-    // Model agreement rate
-    const agreementCounts = medications.map(m => m.sources.length);
-    if (agreementCounts.length > 0) {
-      const avgAgreement = agreementCounts.reduce((s, c) => s + c, 0) / agreementCounts.length;
-      const n = this.metrics.totalPrescriptions || 1;
-      this.metrics.modelAgreementRate =
-        (this.metrics.modelAgreementRate * (n - 1) + avgAgreement / 3) / n;
-    }
-  }
-
-  private recalculateAccuracies(): void {
-    for (const source of ['donut', 'regex', 'gemini', 'ensemble'] as const) {
-      const m = this.metrics[source];
-      m.accuracy = m.totalPredictions > 0
-        ? m.correctPredictions / m.totalPredictions
-        : 0;
-      m.lastUpdated = new Date().toISOString();
-    }
-  }
-
-  private trimHistory(): void {
-    if (this.predictions.length > MAX_HISTORY) {
-      this.predictions = this.predictions.slice(-MAX_HISTORY);
-    }
-  }
-
-  private getDefaultMetrics(): AccuracySnapshot {
-    const defaultModel: ModelMetrics = {
-      totalPredictions: 0,
-      correctPredictions: 0,
-      accuracy: 0,
-      totalMedicationsFound: 0,
-      averageConfidence: 0,
-      lastUpdated: new Date().toISOString(),
-    };
-
-    return {
-      donut: { ...defaultModel },
-      regex: { ...defaultModel },
-      gemini: { ...defaultModel },
-      ensemble: { ...defaultModel },
-      totalPrescriptions: 0,
-      modelAgreementRate: 0,
-      lastUpdated: new Date().toISOString(),
-    };
-  }
-
-  // ─── Persistence ──────────────────────────
-
-  private saveToStorage(): void {
+  setScope(uid:string|null):void {
+    if(uid===this.scope)return;
+    this.scopeGeneration++;
+    this.scope=uid;this.predictions=[];this.baseline=this.defaults();
     try {
-      const data = JSON.stringify({
-        metrics: this.metrics,
-        predictions: this.predictions.slice(-MAX_HISTORY),
-      });
-      localStorage.setItem(STORAGE_KEY, data);
-    } catch {
-      // localStorage may not be available
-    }
-  }
-
-  private loadFromStorage(): void {
-    try {
-      const data = localStorage.getItem(STORAGE_KEY);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (parsed.metrics) {
-          this.metrics = { ...this.getDefaultMetrics(), ...parsed.metrics };
-        }
-        if (parsed.predictions) {
-          this.predictions = parsed.predictions;
-        }
-        console.log(
-          `[AccuracyTracker] Loaded ${this.predictions.length} predictions, ` +
-          `${this.metrics.totalPrescriptions} total prescriptions`
-        );
+      localStorage.removeItem('careconnect_model_accuracy');
+      const data=this.key?JSON.parse(localStorage.getItem(this.key)||'null'):null;
+      if(data && sources.every(source=>Number.isFinite(data[source]?.totalPredictions)
+        && Number.isFinite(data[source]?.correctPredictions) && data[source].totalPredictions>=0
+        && data[source].correctPredictions>=0 && data[source].correctPredictions<=data[source].totalPredictions)){
+        this.baseline=data;
       }
-    } catch {
-      // Ignore errors
-    }
+    }catch{/* Optional aggregate storage only. */}
+    this.recalculate();
   }
+  recordPrediction(items:EnsembleMedication[],scopeToken=this.scopeGeneration,invokedSources?:ModelSource[]):string {
+    if(scopeToken!==this.scopeGeneration)return '';
+    const id='pred-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
+    this.predictions.push({id,timestamp:new Date().toISOString(),wasConfirmed:false,wasCorrected:false,
+      invokedSources:invokedSources || [...new Set(items.flatMap(item=>item.sources))],
+      medications:items.map(item=>({...clean(item.medication),sources:[...item.sources],
+        confidence:item.confidence,sourceDetails:JSON.parse(JSON.stringify(item.sourceDetails||{}))}))});
+    this.recalculate();return id;
+  }
+  confirmPrediction(id:string):void {
+    const record=this.predictions.find(item=>item.id===id);
+    if(!record||record.wasConfirmed)return;
+    record.wasConfirmed=true;record.correctMedications=record.medications.map(clean);
+    this.recalculate();
+  }
+  recordCorrection(id:string,truth:Regimen[]):void {
+    const record=this.predictions.find(item=>item.id===id);
+    if(!record)return;
+    record.wasConfirmed=true;record.correctMedications=truth.map(clean);
+    record.wasCorrected=record.medications.length!==truth.length ||
+      record.medications.some((med,index)=>!truth[index]||!equal(med,truth[index]));
+    this.recalculate();
+  }
+  private recalculate():void {
+    const metrics=JSON.parse(JSON.stringify(this.baseline)) as AccuracySnapshot;
+    metrics.totalPrescriptions+=this.predictions.length;
+    for(const record of this.predictions){
+      for(const source of sources){
+        if(source!=='ensemble' && !record.invokedSources.includes(source))continue;
+        const candidates:Regimen[] = source==='ensemble'?record.medications:record.medications.flatMap(med=>{
+          if(!med.sources.includes(source))return[];
+          return med.sourceDetails?.[source]?.candidates?.length
+            ? med.sourceDetails[source]!.candidates.map(clean) : [clean(med)];
+        });
+        const target=metrics[source];
+        const previous=target.totalMedicationsFound;
+        target.totalMedicationsFound+=candidates.length;
+        const confidenceValues=source==='ensemble' ? record.medications.map(med=>med.confidence) : record.medications.filter(med=>med.sources.includes(source)).flatMap(med=>{
+          const evidence=med.sourceDetails?.[source];
+          return evidence?.candidates?.length ? evidence.candidates.map(candidate=>Number.isFinite(candidate.confidence)?candidate.confidence:evidence.confidence) : [evidence?.confidence ?? med.confidence];
+        });
+        const confidence=confidenceValues.length ? confidenceValues.reduce((sum,value)=>sum+(Number.isFinite(value)?value:0),0)/confidenceValues.length : 0;
+        if(target.totalMedicationsFound)target.averageConfidence=
+          (target.averageConfidence*previous+confidence*candidates.length)/target.totalMedicationsFound;
+        if(record.wasConfirmed && record.correctMedications){
+          const available=[...record.correctMedications];
+          let correct=0;
+          for(const candidate of candidates){
+            const index=available.findIndex(truth=>equal(candidate,truth));
+            if(index>=0){correct++;available.splice(index,1);}
+          }
+          target.totalPredictions+=Math.max(candidates.length,record.correctMedications.length);
+          target.correctPredictions+=correct;
+        }
+      }
+    }
+    const baseCount=this.baseline.totalPrescriptions;
+    const agreement=this.predictions.reduce((sum,record)=>sum+(record.medications.length
+      ? record.medications.reduce((total,med)=>total+med.sources.length/3,0)/record.medications.length : 0),0);
+    metrics.modelAgreementRate=metrics.totalPrescriptions
+      ? (this.baseline.modelAgreementRate*baseCount+agreement)/metrics.totalPrescriptions : 0;
+    for(const source of sources){
+      metrics[source].accuracy=metrics[source].totalPredictions
+        ? Math.min(1,metrics[source].correctPredictions/metrics[source].totalPredictions):0;
+      metrics[source].lastUpdated=new Date().toISOString();
+    }
+    metrics.lastUpdated=new Date().toISOString();this.metrics=metrics;
+    // Never persist raw medication histories or prescription text for metrics.
+    try {if(this.key)localStorage.setItem(this.key,JSON.stringify(metrics));}catch{/* Storage unavailable. */}
+  }
+  getMetrics():AccuracySnapshot{return JSON.parse(JSON.stringify(this.metrics));}
+  getModelMetrics(source:ModelSource):ModelMetrics{return {...this.metrics[source]};}
+  getRecentPredictions(count=10):PredictionRecord[]{return this.predictions.slice(-count).reverse();}
+  getTotalPrescriptions():number{return this.metrics.totalPrescriptions;}
+  exportMetrics():string{return JSON.stringify({exportedAt:new Date().toISOString(),metrics:this.metrics},null,2);}
+  reset():void{this.predictions=[];this.baseline=this.defaults();this.recalculate();}
 }
-
-// Singleton instance
-export const modelAccuracyTracker = new ModelAccuracyTracker();
+export const modelAccuracyTracker=new ModelAccuracyTracker();

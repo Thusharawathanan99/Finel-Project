@@ -1,8 +1,10 @@
-// Firebase Authentication service for CareConnect
+// Firebase identities authenticate requests; the API owns all application roles.
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   getAuth,
+  deleteUser,
+  sendPasswordResetEmail,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   updateProfile,
@@ -10,6 +12,7 @@ import {
 } from 'firebase/auth';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { auth } from '../firebase';
+import { API_URL } from './apiConfig';
 
 export type UserRole = 'patient' | 'caretaker' | 'admin';
 
@@ -20,11 +23,6 @@ export interface AppUser {
   role: UserRole;
   residentId?: string;
 }
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
-const DEFAULT_ADMIN_EMAIL = 'admin@careconnect.com';
-const DEFAULT_ADMIN_PASSWORD = 'admin123';
-const DEFAULT_ADMIN_NAME = 'System Administrator';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -52,143 +50,50 @@ export interface CreatedCaretakerAccount {
   role: 'caretaker';
 }
 
-interface UserProfilePayload {
-  uid: string;
-  name: string;
-  email: string;
-  role: UserRole;
-  residentId?: string;
-}
-
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-function isDefaultAdminEmail(email: string): boolean {
-  return normalizeEmail(email) === DEFAULT_ADMIN_EMAIL;
-}
-
-function isDefaultAdminCredential(email: string, password: string): boolean {
-  return isDefaultAdminEmail(email) && password === DEFAULT_ADMIN_PASSWORD;
-}
-
-async function upsertUserProfile(payload: UserProfilePayload, token?: string): Promise<void> {
-  const authToken = token ?? (await getIdToken());
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (authToken) {
-    headers.Authorization = `Bearer ${authToken}`;
+export function getPasswordValidationError(password: string): string | null {
+  if (password.length < 8) return 'Password must be at least 8 characters.';
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+    return 'Password must include uppercase, lowercase, and a number.';
   }
+  return null;
+}
 
-  const response = await fetch(`${API_URL}/users`, {
+export function getCaretakerPasswordValidationError(password: string): string | null {
+  return password.length < 6 ? 'Temporary password must be at least 6 characters.' : null;
+}
+
+async function readResponse(response: Response): Promise<any> {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(new Error(body.error || body.message || `Request failed (${response.status}). Please try again.`), { status: response.status });
+  }
+  return body;
+}
+
+async function registerAccount(endpoint: string, payload: object, token: string): Promise<any> {
+  const request = () => fetch(`${API_URL}/users/${endpoint}`, {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(error || 'Failed to create user profile in database.');
+  }).then(readResponse);
+  try { return await request(); } catch (error: any) {
+    if (error.status) throw error; // A completed transaction reported a definitive failure.
+    return request(); // Registration is idempotent by Firebase UID; retry a lost response once.
   }
 }
 
-async function assignResidentToCaretaker(token: string, caretakerId: string, residentId: string): Promise<void> {
-  const response = await fetch(`${API_URL}/caretakers/${encodeURIComponent(caretakerId)}/assign-resident`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ residentId }),
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(error || 'Failed to assign resident to caretaker.');
-  }
-}
-
-async function createIsolatedAuthUser(email: string, password: string, name: string): Promise<{ uid: string }> {
-  const appName = `careconnect-provision-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const isolatedApp = initializeApp(firebaseConfig, appName);
-  const isolatedAuth = getAuth(isolatedApp);
-
-  try {
-    const credential = await createUserWithEmailAndPassword(isolatedAuth, email, password);
-    await updateProfile(credential.user, { displayName: name });
-    return { uid: credential.user.uid };
-  } finally {
-    try {
-      await firebaseSignOut(isolatedAuth);
-    } catch {
-      // No-op: isolated auth may already be signed out.
-    }
-    await deleteApp(isolatedApp);
-  }
-}
-
-async function bootstrapDefaultAdminAccount(email: string, password: string): Promise<FirebaseUser> {
-  const normalizedEmail = normalizeEmail(email);
-
-  const credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
-  const firebaseUser = credential.user;
-
-  await updateProfile(firebaseUser, { displayName: DEFAULT_ADMIN_NAME });
-  const token = await firebaseUser.getIdToken();
-
-  await upsertUserProfile(
-    {
-      uid: firebaseUser.uid,
-      name: DEFAULT_ADMIN_NAME,
-      email: normalizedEmail,
-      role: 'admin',
-    },
-    token
-  );
-
-  return firebaseUser;
-}
-
-async function isCurrentUserAdmin(token: string): Promise<boolean> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    return false;
-  }
-
-  if (isDefaultAdminEmail(currentUser.email || '')) {
-    return true;
-  }
-
-  try {
-    const response = await fetch(`${API_URL}/users/${currentUser.uid}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-
-    if (!response.ok) {
-      return false;
-    }
-
-    const userData = await response.json();
-    return userData.role === 'admin';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Get the current Firebase user's ID token for API authentication.
- */
 export async function getIdToken(): Promise<string | null> {
-  const user = auth.currentUser;
-  if (!user) return null;
-  return user.getIdToken();
+  const identity = auth.currentUser;
+  const token = identity ? await identity.getIdToken() : null;
+  if (auth.currentUser?.uid !== identity?.uid) throw new Error('Your signed-in account changed. Please try again.');
+  return token;
 }
 
-/**
- * Sign up a new patient and link them to a caretaker.
- */
+async function signOutIdentity(identity: FirebaseUser): Promise<void> {
+  if (auth.currentUser?.uid === identity.uid) await firebaseSignOut(auth).catch(() => {});
+}
+
+/** Create the application records in one backend transaction. */
 export async function signUp(
   email: string,
   password: string,
@@ -196,308 +101,165 @@ export async function signUp(
   caretakerId: string,
   residentId?: string
 ): Promise<AppUser> {
-  const normalizedEmail = normalizeEmail(email);
-  const credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
-  const firebaseUser = credential.user;
-  const token = await firebaseUser.getIdToken();
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new Error('Full name is required.');
+  if (!caretakerId) throw new Error('Please select a caretaker.');
+  const passwordError = getPasswordValidationError(password);
+  if (passwordError) throw new Error(passwordError);
 
-  // Ensure patient accounts are always linked to a resident profile.
-  let linkedResidentId = residentId?.trim() || undefined;
-
-  if (linkedResidentId) {
-    const residentCheck = await fetch(`${API_URL}/residents/${encodeURIComponent(linkedResidentId)}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-
-    if (!residentCheck.ok) {
-      throw new Error('Resident ID not found. Please check the ID or leave it empty to auto-create a profile.');
-    }
-  } else {
-    linkedResidentId = `R-${firebaseUser.uid.slice(0, 8).toUpperCase()}`;
-
-    const createResidentRes = await fetch(`${API_URL}/residents`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        residentId: linkedResidentId,
-        name,
-      }),
-    });
-
-    if (!createResidentRes.ok) {
-      const errText = await createResidentRes.text();
-      throw new Error(errText || 'Failed to auto-create resident profile for patient signup.');
-    }
+  // Validate the public caretaker choice before creating a Firebase account.
+  const caretakers = await readResponse(await fetch(`${API_URL}/caretakers`));
+  if (!Array.isArray(caretakers) || !caretakers.some(c => c.caretaker_id === caretakerId && c.is_active !== false && c.is_active !== 0)) {
+    throw new Error('Selected caretaker is no longer available. Please select another caretaker.');
   }
 
-  if (!caretakerId) {
-    throw new Error('Please select a caretaker to complete registration.');
-  }
-
-  // 2. Set display name
-  await updateProfile(firebaseUser, { displayName: name });
-
-  // 3. Create user record in MySQL via API
-  await upsertUserProfile(
-    {
-      uid: firebaseUser.uid,
-      name,
-      email: normalizedEmail,
-      role: 'patient',
-      residentId: linkedResidentId,
-    },
-    token
-  );
-
-  if (!linkedResidentId) {
-    throw new Error('Resident profile was not created successfully.');
-  }
-
-  // 4. Assign this patient resident to the selected caretaker.
-  await assignResidentToCaretaker(token, caretakerId, linkedResidentId);
-
-  return {
-    uid: firebaseUser.uid,
-    name,
-    email: normalizedEmail,
-    role: 'patient',
-    residentId: linkedResidentId,
-  };
-}
-
-/**
- * Sign in an existing user with Firebase Auth and fetch their MySQL profile.
- */
-export async function signIn(email: string, password: string): Promise<AppUser> {
-  const normalizedEmail = normalizeEmail(email);
-
-  if (isDefaultAdminEmail(normalizedEmail) && password !== DEFAULT_ADMIN_PASSWORD) {
-    throw new Error('Invalid admin credentials. Use admin123 as the password.');
-  }
-
-  let firebaseUser: FirebaseUser;
-
+  let createdIdentity = true;
+  let credential;
   try {
-    const credential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
-    firebaseUser = credential.user;
+    credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
   } catch (error: any) {
-    const code = error?.code || '';
-    const shouldBootstrapAdmin =
-      isDefaultAdminCredential(normalizedEmail, password) &&
-      (code === 'auth/user-not-found' || code === 'auth/invalid-credential');
-
-    if (!shouldBootstrapAdmin) {
-      throw error;
+    if (error.code !== 'auth/email-already-in-use') throw error;
+    // Recover an earlier incomplete signup, only after proving the account password.
+    credential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+    const token = await credential.user.getIdToken();
+    const response = await fetch(`${API_URL}/users/${credential.user.uid}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (response.status !== 404) {
+      await readResponse(response);
+      throw new Error('An account with this email already exists. Please sign in.');
     }
-
+    createdIdentity = false;
+  }
+  const firebaseUser = credential.user;
+  let registrationAttempted = false;
+  try {
+    await updateProfile(firebaseUser, { displayName: normalizedName });
+    const token = await firebaseUser.getIdToken();
+    registrationAttempted = true;
+    const data = await registerAccount('register-patient', { name: normalizedName, email: normalizedEmail, caretakerId, residentId: residentId?.trim() || undefined }, token);
+    if (!data.residentId) throw new Error('Patient registration response was incomplete.');
+    return { uid: firebaseUser.uid, name: normalizedName, email: normalizedEmail, role: 'patient', residentId: data.residentId };
+  } catch (error) {
+    // A lost response may follow a committed registration. Check before deleting identity.
     try {
-      firebaseUser = await bootstrapDefaultAdminAccount(normalizedEmail, password);
-    } catch (bootstrapError: any) {
-      if (bootstrapError?.code === 'auth/email-already-in-use') {
-        const retryCredential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
-        firebaseUser = retryCredential.user;
-      } else {
-        throw bootstrapError;
+      const token = await firebaseUser.getIdToken();
+      const response = await fetch(`${API_URL}/users/${firebaseUser.uid}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.role === 'patient' && data.resident_id) {
+          return { uid: firebaseUser.uid, name: data.name, email: data.email, role: 'patient', residentId: data.resident_id };
+        }
       }
+    } catch {
+      // The original registration error remains the actionable error.
     }
+    if ((registrationAttempted && !(error as any)?.status) || !createdIdentity) {
+      await signOutIdentity(firebaseUser);
+      throw new Error('Registration could not be confirmed. Retry Patient Register with the same email and password to finish safely.');
+    }
+    try {
+      await deleteUser(firebaseUser);
+    } catch {
+      await signOutIdentity(firebaseUser);
+      throw new Error('Registration did not finish and account cleanup failed. Retry Patient Register with the same email and password.');
+    }
+    throw error;
   }
-
-  // Fetch full user profile from MySQL
-  const token = await firebaseUser.getIdToken();
-  const response = await fetch(`${API_URL}/users/${firebaseUser.uid}`, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
-
-  if (response.ok) {
-    const userData = await response.json();
-
-    const resolvedRole: UserRole = isDefaultAdminEmail(userData.email || normalizedEmail)
-      ? 'admin'
-      : (userData.role || 'patient');
-
-    return {
-      uid: firebaseUser.uid,
-      name: userData.name || firebaseUser.displayName || '',
-      email: userData.email || firebaseUser.email || '',
-      role: resolvedRole,
-      residentId: userData.resident_id,
-    };
-  }
-
-  if (response.status === 404 && isDefaultAdminCredential(normalizedEmail, password)) {
-    await upsertUserProfile(
-      {
-        uid: firebaseUser.uid,
-        name: firebaseUser.displayName || DEFAULT_ADMIN_NAME,
-        email: normalizedEmail,
-        role: 'admin',
-      },
-      token
-    );
-
-    return {
-      uid: firebaseUser.uid,
-      name: firebaseUser.displayName || DEFAULT_ADMIN_NAME,
-      email: firebaseUser.email || normalizedEmail,
-      role: 'admin',
-    };
-  }
-
-  // Fallback: return basic info from Firebase if MySQL record missing
-  return {
-    uid: firebaseUser.uid,
-    name: firebaseUser.displayName || '',
-    email: firebaseUser.email || '',
-    role: isDefaultAdminEmail(firebaseUser.email || normalizedEmail) ? 'admin' : 'patient',
-  };
 }
 
-/**
- * Admin-only caretaker account creation.
- * Creates Firebase Auth user in an isolated auth instance so admin stays logged in.
- */
+export async function signIn(email: string, password: string): Promise<AppUser> {
+  const credential = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+  try {
+    return await fetchUserProfile(credential.user);
+  } catch (error) {
+    await signOutIdentity(credential.user);
+    throw error;
+  }
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    throw new Error('Enter a valid email address first.');
+  }
+  try {
+    await sendPasswordResetEmail(auth, normalizedEmail);
+  } catch (error: any) {
+    // Do not reveal whether an email address has an account.
+    if (error?.code !== 'auth/user-not-found') throw error;
+  }
+}
+
+/** Provision identity separately, then create profile and caretaker atomically. */
 export async function createCaretakerAccount(input: CreateCaretakerInput): Promise<CreatedCaretakerAccount> {
   const currentUser = auth.currentUser;
-  if (!currentUser) {
-    throw new Error('Please sign in as admin first.');
-  }
-
+  if (!currentUser) throw new Error('Please sign in as admin first.');
+  const profile = await fetchUserProfile(currentUser);
+  if (profile.role !== 'admin') throw new Error('Only admin can add caretakers.');
   const name = input.name.trim();
-  const email = normalizeEmail(input.email);
-  const password = input.password;
-
-  if (!name) {
-    throw new Error('Caretaker name is required.');
+  const email = input.email.trim().toLowerCase();
+  if (!name || !email) throw new Error('Caretaker name and email are required.');
+  const passwordError = getCaretakerPasswordValidationError(input.password);
+  if (passwordError) throw new Error(passwordError);
+  const token = await currentUser.getIdToken();
+  const isolatedApp = initializeApp(firebaseConfig, `careconnect-provision-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const isolatedAuth = getAuth(isolatedApp);
+  let createdUser: FirebaseUser | undefined;
+  let registrationAttempted = false;
+  try {
+    const credential = await createUserWithEmailAndPassword(isolatedAuth, email, input.password);
+    createdUser = credential.user;
+    await updateProfile(createdUser, { displayName: name });
+    registrationAttempted = true;
+    const data = await registerAccount('register-caretaker', { uid: createdUser.uid, name, email, phone: input.phone?.trim() || '', specialization: input.specialization?.trim() || '' }, token);
+    return { uid: createdUser.uid, caretakerId: data.caretakerId, name, email, role: 'caretaker' };
+  } catch (error) {
+    if (createdUser) {
+      // Preserve identity if the transaction committed but its response was lost.
+      try {
+        const response = await fetch(`${API_URL}/users/${createdUser.uid}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (response.ok) {
+          const existing = await response.json();
+          if (existing.role === 'caretaker') {
+            const caretakers = await readResponse(await fetch(`${API_URL}/caretakers`, { headers: { Authorization: `Bearer ${token}` } }));
+            const caretaker = caretakers.find((c: any) => c.email?.toLowerCase() === email);
+            if (caretaker) return { uid: createdUser.uid, caretakerId: caretaker.caretaker_id, name, email, role: 'caretaker' };
+          }
+        }
+      } catch {
+        // Best effort confirmation; the provisioning error is shown below.
+      }
+      if (registrationAttempted && !(error as any)?.status) throw new Error('Caretaker creation could not be confirmed. Check the account before trying again.');
+      try { await deleteUser(createdUser); } catch {
+        throw new Error('Caretaker creation failed and identity cleanup failed. Check the account before trying again.');
+      }
+    }
+    throw error;
+  } finally {
+    await firebaseSignOut(isolatedAuth).catch(() => {});
+    await deleteApp(isolatedApp);
   }
-  if (!email) {
-    throw new Error('Caretaker email is required.');
-  }
-  if (!password || password.length < 6) {
-    throw new Error('Caretaker password must be at least 6 characters.');
-  }
-
-  const token = await currentUser.getIdToken(true);
-  const adminAllowed = await isCurrentUserAdmin(token);
-  if (!adminAllowed) {
-    throw new Error('Only admin can add caretakers.');
-  }
-
-  const createdAuthUser = await createIsolatedAuthUser(email, password, name);
-
-  await upsertUserProfile(
-    {
-      uid: createdAuthUser.uid,
-      name,
-      email,
-      role: 'caretaker',
-    },
-    token
-  );
-
-  const caretakerResponse = await fetch(`${API_URL}/caretakers`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      name,
-      email,
-      phone: input.phone?.trim() || '',
-      specialization: input.specialization?.trim() || '',
-    }),
-  });
-
-  if (!caretakerResponse.ok) {
-    const error = await caretakerResponse.text();
-    throw new Error(error || 'Failed to create caretaker profile.');
-  }
-
-  const caretakerData = await caretakerResponse.json();
-
-  return {
-    uid: createdAuthUser.uid,
-    caretakerId: caretakerData.caretakerId,
-    name,
-    email,
-    role: 'caretaker',
-  };
 }
 
-/**
- * Sign out the current user.
- */
 export async function signOut(): Promise<void> {
   await firebaseSignOut(auth);
 }
 
-/**
- * Listen for auth state changes. Returns an unsubscribe function.
- */
-export function onAuthStateChange(
-  callback: (user: FirebaseUser | null) => void
-): () => void {
+export function onAuthStateChange(callback: (user: FirebaseUser | null) => void): () => void {
   return onAuthStateChanged(auth, callback);
 }
 
-/**
- * Fetch the full AppUser profile for a Firebase user.
- */
+/** A missing/unreachable application profile is an error, never a guessed role. */
 export async function fetchUserProfile(firebaseUser: FirebaseUser): Promise<AppUser> {
-  const normalizedEmail = normalizeEmail(firebaseUser.email || '');
-
-  try {
-    const token = await firebaseUser.getIdToken();
-    const response = await fetch(`${API_URL}/users/${firebaseUser.uid}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-
-    if (response.ok) {
-      const userData = await response.json();
-
-      const resolvedRole: UserRole = isDefaultAdminEmail(userData.email || normalizedEmail)
-        ? 'admin'
-        : (userData.role || 'patient');
-
-      return {
-        uid: firebaseUser.uid,
-        name: userData.name || firebaseUser.displayName || '',
-        email: userData.email || firebaseUser.email || '',
-        role: resolvedRole,
-        residentId: userData.resident_id,
-      };
-    }
-
-    if (response.status === 404 && isDefaultAdminEmail(normalizedEmail)) {
-      await upsertUserProfile(
-        {
-          uid: firebaseUser.uid,
-          name: firebaseUser.displayName || DEFAULT_ADMIN_NAME,
-          email: normalizedEmail,
-          role: 'admin',
-        },
-        token
-      );
-
-      return {
-        uid: firebaseUser.uid,
-        name: firebaseUser.displayName || DEFAULT_ADMIN_NAME,
-        email: firebaseUser.email || normalizedEmail,
-        role: 'admin',
-      };
-    }
-  } catch (err) {
-    console.warn('[Auth] Could not fetch user profile from API:', err);
-  }
-
-  // Fallback
-  return {
-    uid: firebaseUser.uid,
-    name: firebaseUser.displayName || '',
-    email: firebaseUser.email || '',
-    role: isDefaultAdminEmail(firebaseUser.email || '') ? 'admin' : 'patient',
+  const assertIdentity = () => {
+    if (auth.currentUser?.uid !== firebaseUser.uid) throw new Error('Your signed-in account changed. Please sign in again.');
   };
+  assertIdentity();
+  const token = await firebaseUser.getIdToken();
+  assertIdentity();
+  const data = await readResponse(await fetch(`${API_URL}/users/${firebaseUser.uid}`, { headers: { Authorization: `Bearer ${token}` } }));
+  assertIdentity();
+  if (!['patient', 'caretaker', 'admin'].includes(data.role)) throw new Error('Account role is not configured. Please contact your administrator.');
+  if (data.role === 'patient' && !data.resident_id) throw new Error('Patient profile is incomplete. Please contact your administrator.');
+  return { uid: firebaseUser.uid, name: data.name || firebaseUser.displayName || '', email: data.email || firebaseUser.email || '', role: data.role, residentId: data.resident_id || undefined };
 }

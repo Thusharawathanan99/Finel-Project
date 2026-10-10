@@ -1,0 +1,28 @@
+[Unit]
+Description=CareConnect experimental pose monitoring
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=careconnect-edge
+Group=careconnect-edge
+SupplementaryGroups=video render
+WorkingDirectory=/opt/careconnect-edge
+EnvironmentFile=/etc/careconnect-edge.env
+ExecStart=/opt/careconnect-edge/.venv/bin/python -m edge.worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=careconnect-edge
+ReadWritePaths=/var/lib/careconnect-edge
+
+[Install]
+WantedBy=multi-user.target

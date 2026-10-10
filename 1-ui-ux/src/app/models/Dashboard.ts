@@ -1,9 +1,9 @@
 import { Resident } from './Resident';
 import { Alert } from './Alert';
 import { RecommendationEngine } from './RecommendationEngine';
-import { OCREngine } from './OCREngine';
-import { NLPEngine, NLPResult } from './NLPEngine';
-import { EmotionAnalysisEngine, EmotionAnalysisResult } from './EmotionAnalysisEngine';
+import type { OCREngine } from './OCREngine';
+import type { NLPEngine, NLPResult } from './NLPEngine';
+import type { EmotionAnalysisEngine, EmotionAnalysisResult } from './EmotionAnalysisEngine';
 import { Caretaker, LeaveRequest } from './Caretaker';
 import { EmergencyAlert } from './EmergencyAlert';
 import { SystemComponent } from './SystemComponent';
@@ -16,15 +16,17 @@ import { WeeklyMealPlan, MealItem } from '../ml/meal-plan/MealPlan';
 import { datasetCollector } from '../ml/dataset/DatasetCollector';
 import { uploadPrescriptionImage } from '../services/storageService';
 import { prescriptionsApi, emotionsApi } from '../services/apiService';
-import { pushEmotionUpdate } from '../services/firestoreService';
+import { auth } from '../firebase';
 
 export class Dashboard {
   residents: Resident[];
   alerts: Alert[];
   recommendationEngine: RecommendationEngine;
-  ocrEngine: OCREngine;
-  nlpEngine: NLPEngine;
-  emotionAnalysisEngine: EmotionAnalysisEngine;
+  ocrEngine?: OCREngine;
+  nlpEngine?: NLPEngine;
+  emotionAnalysisEngine?: EmotionAnalysisEngine;
+  private pendingPrescriptionIds = new Map<string, string>();
+  clearPendingPrescriptionDrafts():void { this.pendingPrescriptionIds.clear(); }
   caretakers: Caretaker[];
   emergencyAlerts: EmergencyAlert[];
   systemComponents: SystemComponent[];
@@ -34,9 +36,6 @@ export class Dashboard {
     this.residents = [];
     this.alerts = [];
     this.recommendationEngine = new RecommendationEngine();
-    this.ocrEngine = new OCREngine('2.5.1');
-    this.nlpEngine = new NLPEngine('3.1.0');
-    this.emotionAnalysisEngine = new EmotionAnalysisEngine('1.8.2');
     this.caretakers = [];
     this.emergencyAlerts = [];
     this.systemComponents = [];
@@ -50,11 +49,25 @@ export class Dashboard {
    * Initialize all ML engines (lazy model loading).
    */
   async initializeEngines(): Promise<void> {
+    await Promise.all([this.ensurePrescriptionEngines(), this.ensureEmotionEngine()]);
     await Promise.allSettled([
-      this.ocrEngine.initialize(),
-      this.emotionAnalysisEngine.initialize(),
+      this.ocrEngine!.initialize(),
+      this.emotionAnalysisEngine!.initialize(),
     ]);
     console.log('Dashboard: ML engines initialized');
+  }
+
+  private async ensurePrescriptionEngines(): Promise<void> {
+    if (this.ocrEngine && this.nlpEngine) return;
+    const [ocr, nlp] = await Promise.all([import('./OCREngine'), import('./NLPEngine')]);
+    this.ocrEngine ||= new ocr.OCREngine('2.5.1');
+    this.nlpEngine ||= new nlp.NLPEngine('3.1.0');
+  }
+  private async ensureEmotionEngine(): Promise<void> {
+    if (!this.emotionAnalysisEngine) {
+      const engine = await import('./EmotionAnalysisEngine');
+      this.emotionAnalysisEngine = new engine.EmotionAnalysisEngine('1.8.2');
+    }
   }
 
   // Resident management
@@ -117,7 +130,7 @@ export class Dashboard {
   getUpcomingAppointments(): Appointment[] {
     const now = new Date();
     return this.appointments.filter(a => 
-      a.appointmentDate >= now && a.status === 'scheduled'
+      a.isUpcoming(now)
     );
   }
 
@@ -190,6 +203,8 @@ export class Dashboard {
     }
 
     resident.addFinishedMedication(finishedMedication);
+    clearMealPlanCache(residentId);
+    resident.mealPlan = undefined;
 
     return finishedMedication;
   }
@@ -202,8 +217,12 @@ export class Dashboard {
     residentId: string,
     doctorName: string,
     medications: Medication[],
-    imageFile?: File | null
+    imageFile?: File | null,
+    patientName?: string,
+    dateIssued?: string,
+    rawText?: string
   ): Promise<boolean> {
+    const identityAtStart = auth?.currentUser?.uid;
     const resident = this.getResident(residentId);
     if (!resident) {
       console.error('Resident not found');
@@ -214,6 +233,7 @@ export class Dashboard {
       console.warn('No medications provided for save');
       return false;
     }
+    if (!dateIssued || !/^\d{4}-\d{2}-\d{2}$/.test(dateIssued) || Number.isNaN(new Date(`${dateIssued}T00:00:00`).getTime())) return false;
 
     // Step 1: Upload image to Firebase Storage (best effort)
     let imageUrl: string | undefined;
@@ -232,16 +252,20 @@ export class Dashboard {
       }
     }
 
+    if(auth?.currentUser?.uid !== identityAtStart) return false;
     // Step 2: Create prescription and add medications (in-memory)
-    const prescriptionId = `RX-${Date.now()}`;
+    const draftKey = JSON.stringify([residentId, doctorName, patientName, dateIssued, rawText, medications.map(m => [m.drugName,m.dosage,m.frequency,m.duration,m.instructions])]);
+    const prescriptionId = this.pendingPrescriptionIds.get(draftKey) || `RX-${crypto.randomUUID()}`;
+    this.pendingPrescriptionIds.set(draftKey, prescriptionId);
     const prescription = new Prescription(
       prescriptionId,
-      new Date(),
-      doctorName
+      new Date(`${dateIssued}T00:00:00`),
+      doctorName,
+      patientName,
+      rawText
     );
 
     medications.forEach(med => prescription.addMedication(med));
-    resident.addPrescription(prescription);
 
     // Step 3: Save prescription + medications to MySQL
     let dbSaved = true;
@@ -249,20 +273,34 @@ export class Dashboard {
       await prescriptionsApi.create({
         prescriptionId,
         residentId,
-        dateIssued: new Date().toISOString().split('T')[0],
+        dateIssued,
         doctorName,
+        patientName,
+        rawText,
         imageUrl,
         medications: medications.map(m => ({
           drugName: m.drugName,
           dosage: m.dosage,
           frequency: m.frequency,
+          duration: m.duration,
+          instructions: m.instructions,
+          confidence: m.confidence,
+          needsReview: Boolean(m.needsReview),
+          reviewReasons: m.reviewReasons || [],
+          conflictingFields: m.conflictingFields || [],
+          sourceDetails: m.sourceDetails || {},
+          confirmed: Boolean(m.verifiedByUser),
         })),
       });
       console.log(`✓ Prescription saved to MySQL`);
     } catch (err) {
-      console.warn('⚠️ MySQL save failed (data is still in-memory):', err);
-      dbSaved = false;
+      console.warn('Prescription could not be saved:', err);
+      return false;
     }
+
+    if (!resident.prescriptions.some(item => item.prescriptionId === prescriptionId)) resident.addPrescription(prescription);
+    this.pendingPrescriptionIds.delete(draftKey);
+    clearMealPlanCache(residentId);
 
     // Step 4: Record for dataset collection (best effort)
     try {
@@ -276,7 +314,7 @@ export class Dashboard {
           wasCorreted: false,
         })),
         1,
-        this.ocrEngine.modelVersion,
+        '3.1.0',
         imageFile ? 'upload' : 'camera'
       );
     } catch (err) {
@@ -310,96 +348,38 @@ export class Dashboard {
     }
 
     // Step 1: OCR extracts text from image
-    const ocrResult = await this.ocrEngine.extractText(imageSource);
+    await this.ensurePrescriptionEngines();
+    const ocrResult = await this.ocrEngine!.extractText(imageSource);
     console.log(`✓ OCR complete: ${ocrResult.lines.length} lines, ${(ocrResult.confidence * 100).toFixed(0)}% confidence`);
 
     // Step 2: NLP parses text to create medications
     const imageBase64 = imageSource instanceof File ? undefined : imageSource;
-    const nlpResult = await this.nlpEngine.parseTextToMedication(ocrResult.text, imageBase64, imageSource);
+    const nlpResult = await this.nlpEngine!.parseTextToMedication(ocrResult.text, imageBase64, imageSource);
     console.log(`✓ NLP complete: ${nlpResult.medications.length} medications, source: ${nlpResult.source}`);
 
-    // Step 3: Upload image to Firebase Storage
-    let imageUrl: string | undefined;
-    let imagePath: string | undefined;
-    try {
-      if (imageSource instanceof File) {
-        const uploadResult = await uploadPrescriptionImage(imageSource, residentId);
-        imageUrl = uploadResult.url;
-        imagePath = uploadResult.path;
-        console.log(`✓ Image uploaded to Firebase Storage`);
-      }
-    } catch (err) {
-      console.warn('⚠️ Image upload to Firebase Storage failed (continuing):', err);
-    }
-
-    // Step 4: Create prescription and add medications (in-memory)
-    const prescriptionId = `RX-${Date.now()}`;
-    const prescription = new Prescription(
-      prescriptionId,
-      new Date(),
-      doctorName
-    );
-
-    nlpResult.medications.forEach(med => prescription.addMedication(med));
-    resident.addPrescription(prescription);
-
-    // Step 5: Save prescription + medications to MySQL
-    try {
-      await prescriptionsApi.create({
-        prescriptionId,
-        residentId,
-        dateIssued: new Date().toISOString().split('T')[0],
-        doctorName,
-        imageUrl,
-        medications: nlpResult.medications.map(m => ({
-          drugName: m.drugName,
-          dosage: m.dosage,
-          frequency: m.frequency,
-        })),
-      });
-      console.log(`✓ Prescription saved to MySQL`);
-    } catch (err) {
-      console.warn('⚠️ MySQL save failed (data is still in-memory):', err);
-    }
-
-    // Step 6: Record for dataset collection
-    await datasetCollector.record(
-      imageSource instanceof File ? imageSource : null,
-      ocrResult.text,
-      nlpResult.medications.map(m => ({
-        drugName: m.drugName,
-        dosage: m.dosage,
-        frequency: m.frequency,
-        wasCorreted: false,
-      })),
-      ocrResult.confidence,
-      this.ocrEngine.modelVersion,
-      imageSource instanceof File ? 'upload' : 'camera'
-    );
-
-    console.log(`✓ Prescription processed for ${resident.name}`);
-    console.log(`  ${nlpResult.medications.length} medications extracted`);
-
+    // Extraction produces candidates; saving requires the explicit review flow.
     return nlpResult;
   }
 
   /**
    * Analyze resident emotion using real face-api.js + vocal tone engines.
-   * Now also persists to MySQL and pushes real-time update to Firestore.
+   * Persists observations and any required alert through the authenticated API.
    */
   async analyzeResidentEmotion(
     residentId: string,
     facialImage?: File | string,
     vocalAudio?: File
   ): Promise<EmotionAnalysisResult | null> {
+    const identityAtStart = auth?.currentUser?.uid;
     const resident = this.getResident(residentId);
     if (!resident) {
       console.error('Resident not found');
       return null;
     }
 
-    const result = await this.emotionAnalysisEngine.analyzeResident(facialImage, vocalAudio);
-    resident.addEmotionalState(result.emotionalState);
+    await this.ensureEmotionEngine();
+    const result = await this.emotionAnalysisEngine!.analyzeResident(facialImage, vocalAudio);
+    if(auth?.currentUser?.uid !== identityAtStart) throw new Error('Your signed-in account changed. Please retry.');
 
     // Save to MySQL
     try {
@@ -407,21 +387,8 @@ export class Dashboard {
         residentId,
         stateScore: result.emotionalState.stateScore,
       });
-    } catch (err) {
-      console.warn('⚠️ Emotion save to MySQL failed:', err);
-    }
-
-    // Push real-time update to Firestore
-    try {
-      await pushEmotionUpdate({
-        residentId,
-        residentName: resident.name,
-        stateScore: result.emotionalState.stateScore,
-        emotionalLevel: result.emotionalState.getEmotionalLevel(),
-      });
-    } catch (err) {
-      console.warn('⚠️ Firestore emotion update failed:', err);
-    }
+    } catch (err) { throw new Error('The wellness record could not be saved. Please retry.'); }
+    resident.addEmotionalState(result.emotionalState);
 
     console.log(`✓ Emotional analysis completed for ${resident.name}`);
     console.log(`  Score: ${result.emotionalState.stateScore} (${result.emotionalState.getEmotionalLevel()})`);
@@ -498,7 +465,8 @@ export class Dashboard {
   }
 
   refreshAlerts(): void {
-    this.alerts = this.recommendationEngine.analyzeAllResidents(this.residents);
+    const previous = new Map(this.alerts.map(alert => [alert.severityLevel + ':' + alert.message, alert]));
+    this.alerts = this.recommendationEngine.analyzeAllResidents(this.residents).map(alert => previous.get(alert.severityLevel + ':' + alert.message) || alert);
   }
 
   getActiveAlerts(): Alert[] {

@@ -16,7 +16,7 @@ Usage:
 Prerequisites:
   - Donut model loaded (run donut_server.py first OR use offline mode)
   - Gemini API key set in environment (GEMINI_API_KEY)
-  - Dataset downloaded (uses test split)
+  - Dataset downloaded; training_split.json required to select held-out validation images
 """
 
 import os
@@ -26,6 +26,7 @@ import time
 import logging
 import argparse
 from pathlib import Path
+from training_safety import select_held_out_indices
 from datetime import datetime
 from collections import defaultdict
 
@@ -45,7 +46,7 @@ MODEL_NAME = "chinmays18/medical-prescription-ocr"
 LOCAL_MODEL_PATH = Path(__file__).parent / "models" / "donut-prescription"
 RESULTS_DIR = Path(__file__).parent / "research"
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("VITE_GEMINI_API_KEY", ""))
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 
 # ─────────────────────────────────────────────
@@ -185,13 +186,18 @@ def compute_metrics(predicted: list, ground_truth: list) -> dict:
     if not gt_set:
         return {"precision": 1.0 if not pred_set else 0.0, "recall": 1.0, "f1": 1.0 if not pred_set else 0.0}
 
-    # Fuzzy matching — allow Levenshtein distance ≤ 2
-    true_positives = 0
-    for gt in gt_set:
-        for pred in pred_set:
-            if gt == pred or _fuzzy_match(gt, pred):
-                true_positives += 1
-                break
+    # Maximum one-to-one matching: a prediction may explain at most one reference.
+    assigned = {}
+    def match_reference(gt, visited):
+        for pred in sorted(pred_set):
+            if pred in visited or not (gt == pred or _fuzzy_match(gt, pred)):
+                continue
+            visited.add(pred)
+            if pred not in assigned or match_reference(assigned[pred], visited):
+                assigned[pred] = gt
+                return True
+        return False
+    true_positives = sum(match_reference(gt, set()) for gt in sorted(gt_set))
 
     precision = true_positives / len(pred_set) if pred_set else 0
     recall = true_positives / len(gt_set) if gt_set else 0
@@ -284,11 +290,17 @@ def evaluate(args):
     # Load dataset
     log.info(f"📥 Loading test dataset...")
     dataset = load_dataset(HF_DATASET)
-    data = dataset["train"] if "train" in dataset else dataset[list(dataset.keys())[0]]
-
-    # Use a subset for evaluation
-    total = min(args.test_samples, len(data))
-    indices = random.sample(range(len(data)), total)
+    manifest_path = Path(args.held_out_manifest)
+    if not manifest_path.exists():
+        raise ValueError("A training_split.json manifest is required; evaluation must not sample the training set.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # Locate held-out images by content hash, never by count or a guessed dataset split.
+    data = dataset["test"] if "test" in dataset else dataset["train"] if "train" in dataset else dataset[list(dataset.keys())[0]]
+    eligible = select_held_out_indices(data, manifest)
+    total = min(args.test_samples, len(eligible))
+    if total < 1:
+        raise ValueError("test-samples must be positive.")
+    indices = random.Random(42).sample(eligible, total)
     log.info(f"📊 Evaluating on {total} samples")
 
     # Load Donut model
@@ -417,6 +429,10 @@ def compile_final_results(results, timings, total_samples):
         "evaluated_at": datetime.now().isoformat(),
         "total_samples": total_samples,
         "dataset": HF_DATASET,
+        "evaluation_split": "held-out-validation",
+        "held_out_manifest": str(manifest_path),
+        "medication_metric_scope": "drug names only; dose and schedule accuracy are not measured",
+        "clinical_accuracy_certified": False,
         "model": MODEL_NAME,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
@@ -560,6 +576,7 @@ def export_results(final, output_path=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Donut vs Donut+Gemini")
     parser.add_argument("--test-samples", type=int, default=50, help="Number of test samples")
+    parser.add_argument("--held-out-manifest", default=str(LOCAL_MODEL_PATH / "training_split.json"), help="Image-disjoint manifest saved by training")
     parser.add_argument("--export", type=str, default=None, help="Export results path")
     parser.add_argument("--gemini-key", type=str, default=None, help="Gemini API key")
     args = parser.parse_args()

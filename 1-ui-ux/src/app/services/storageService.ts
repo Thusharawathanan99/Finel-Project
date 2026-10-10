@@ -8,7 +8,8 @@ import {
   type UploadMetadata,
   type StorageReference,
 } from 'firebase/storage';
-import { storage } from '../firebase';
+import { storage, auth } from '../firebase';
+import {apiPost} from './apiService';
 
 const STORAGE_REQUEST_TIMEOUT_MS = import.meta.env.DEV ? 8000 : 15000;
 const DISABLE_STORAGE_UPLOAD_IN_DEV =
@@ -96,6 +97,8 @@ export async function uploadPrescriptionImage(
   const timestamp = Date.now();
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `prescriptions/${residentId}/${timestamp}_${safeName}`;
+  const access=await apiPost<{uid:string}>(`/storage/prescriptions/${encodeURIComponent(residentId)}/access`,{});
+  if(access.uid!==auth.currentUser?.uid)throw new Error('Account changed during image upload. Please try again.');
 
   const storageRef = ref(storage, storagePath);
 
@@ -107,6 +110,7 @@ export async function uploadPrescriptionImage(
       contentType: file.type,
       customMetadata: {
         residentId,
+        uploadedByUid:access.uid,
         uploadedAt: new Date().toISOString(),
       },
     },
@@ -146,7 +150,9 @@ export async function uploadBase64Image(
   const blob = new Blob([byteArray], { type: 'image/jpeg' });
 
   const timestamp = Date.now();
-  const storagePath = `prescriptions/${residentId}/${timestamp}_${filename}`;
+  const storagePath = `prescriptions/${residentId}/${timestamp}_${filename.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+  const access=await apiPost<{uid:string}>(`/storage/prescriptions/${encodeURIComponent(residentId)}/access`,{});
+  if(access.uid!==auth.currentUser?.uid)throw new Error('Account changed during image upload. Please try again.');
   const storageRef = ref(storage, storagePath);
 
   const snapshot = await uploadWithTimeout(
@@ -156,6 +162,7 @@ export async function uploadBase64Image(
       contentType: 'image/jpeg',
       customMetadata: {
         residentId,
+        uploadedByUid:access.uid,
         uploadedAt: new Date().toISOString(),
         source: 'camera',
       },

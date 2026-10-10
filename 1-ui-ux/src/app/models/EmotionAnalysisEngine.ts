@@ -9,6 +9,7 @@ export interface EmotionAnalysisResult {
   dominantFacialEmotion?: string;
   dominantVocalTone?: string;
   processingTimeMs: number;
+  unavailableModalities?: string[];
 }
 
 export class EmotionAnalysisEngine {
@@ -39,10 +40,11 @@ export class EmotionAnalysisEngine {
     console.log(`Analyzing facial expression with model v${this.modelVersion}...`);
     try {
       const result = await this.facialEngine.analyzeFromImage(imageSource);
+      if (!result.faceDetected || !Number.isFinite(result.wellnessScore)) throw new Error('No usable face was detected.');
       return result.wellnessScore;
     } catch (error) {
       console.warn('[EmotionEngine] Facial analysis failed:', error);
-      return 50; // neutral fallback
+      throw new Error('Facial analysis is unavailable. Please use a clear image with a visible face.');
     }
   }
 
@@ -66,7 +68,7 @@ export class EmotionAnalysisEngine {
       return result.wellnessScore;
     } catch (error) {
       console.warn('[EmotionEngine] Vocal analysis failed:', error);
-      return 50; // neutral fallback
+      throw new Error('Vocal analysis is unavailable. Please record audible speech.');
     }
   }
 
@@ -81,9 +83,10 @@ export class EmotionAnalysisEngine {
   /**
    * Generate a combined emotional state from facial and vocal scores.
    */
-  generateEmotionalState(facialScore: number, vocalScore: number): EmotionalState {
-    const averageScore = Math.round((facialScore + vocalScore) / 2);
-    return new EmotionalState(new Date(), averageScore);
+  generateEmotionalState(facialScore?: number, vocalScore?: number): EmotionalState {
+    const scores = [facialScore, vocalScore].filter((score): score is number => typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100);
+    if (!scores.length) throw new Error('Emotion analysis is unavailable: no valid facial or vocal measurement.');
+    return new EmotionalState(new Date(), Math.round(scores.reduce((a, b) => a + b, 0) / scores.length));
   }
 
   /**
@@ -94,8 +97,9 @@ export class EmotionAnalysisEngine {
     vocalAudio?: File
   ): Promise<EmotionAnalysisResult> {
     const startTime = performance.now();
-    let facialScore = 50;
-    let vocalScore = 50;
+    let facialScore: number | undefined;
+    let vocalScore: number | undefined;
+    const unavailableModalities: string[] = [];
     let facialResult: EmotionDetectionResult | undefined;
     let vocalResult: VocalToneResult | undefined;
 
@@ -108,9 +112,12 @@ export class EmotionAnalysisEngine {
           try {
             if (facialImage instanceof File || typeof facialImage === 'string') {
               facialResult = await this.facialEngine.analyzeFromImage(facialImage);
+              if (!facialResult.faceDetected || !Number.isFinite(facialResult.wellnessScore)) throw new Error('No usable face detected.');
               facialScore = facialResult.wellnessScore;
             }
           } catch (error) {
+            facialResult = undefined;
+            unavailableModalities.push('facial');
             console.warn('[EmotionEngine] Facial analysis failed:', error);
           }
         })()
@@ -122,8 +129,11 @@ export class EmotionAnalysisEngine {
         (async () => {
           try {
             vocalResult = await this.vocalEngine.analyzeFile(vocalAudio);
+            if (!Number.isFinite(vocalResult.wellnessScore)) throw new Error('Invalid vocal measurement.');
             vocalScore = vocalResult.wellnessScore;
           } catch (error) {
+            vocalResult = undefined;
+            unavailableModalities.push('vocal');
             console.warn('[EmotionEngine] Vocal analysis failed:', error);
           }
         })()
@@ -137,6 +147,7 @@ export class EmotionAnalysisEngine {
 
     return {
       emotionalState,
+      unavailableModalities,
       facialResult,
       vocalResult,
       dominantFacialEmotion: facialResult?.dominant,

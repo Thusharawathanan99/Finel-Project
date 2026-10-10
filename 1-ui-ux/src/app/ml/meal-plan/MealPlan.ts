@@ -1,9 +1,11 @@
+import type { MealPlanningContext } from '../../../../../4-system-engine/api/routes/mealPlanSafety.js';
 /**
  * Meal Plan Data Models
  * TypeScript interfaces for structured meal plan data returned by Gemini.
  */
 
 export interface MealItem {
+  ingredients?: string[];
   name: string;
   description: string;
   calories: number;
@@ -31,6 +33,10 @@ export interface DailyMealPlan {
 }
 
 export interface WeeklyMealPlan {
+  inputContext?: MealPlanningContext;
+  inputFingerprint?: string;
+  needsReview?: boolean;
+  reviewReasons?: string[];
   residentId: string;
   residentName: string;
   generatedAt: Date;

@@ -68,12 +68,45 @@ export class FacialEmotionEngine {
     await this.initialize();
 
     try {
-      const detection = await faceapi
+      if (typeof HTMLVideoElement !== 'undefined' && input instanceof HTMLVideoElement) {
+        if (input.videoWidth === 0 || input.videoHeight === 0 || input.paused) {
+          return {
+            dominant: 'neutral',
+            scores: {},
+            wellnessScore: 50,
+            faceDetected: false,
+            processingTimeMs: performance.now() - startTime,
+          };
+        }
+      }
+
+      // Pass 1: Standard balance between speed and accuracy
+      let detection = await faceapi
         .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions({
-          inputSize: 224,
-          scoreThreshold: 0.5,
+          inputSize: 320,
+          scoreThreshold: 0.20,
         }))
         .withFaceExpressions();
+
+      // Pass 2: Sensitive pass with smaller input size for tricky lighting/angles
+      if (!detection) {
+        detection = await faceapi
+          .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions({
+            inputSize: 224,
+            scoreThreshold: 0.12,
+          }))
+          .withFaceExpressions();
+      }
+
+      // Pass 3: Detailed pass for distant or smaller faces
+      if (!detection) {
+        detection = await faceapi
+          .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions({
+            inputSize: 416,
+            scoreThreshold: 0.10,
+          }))
+          .withFaceExpressions();
+      }
 
       if (!detection) {
         return {
@@ -177,9 +210,13 @@ export class FacialEmotionEngine {
 
     const detectLoop = async () => {
       while (running) {
-        if (videoElement.readyState >= 2) {
-          const result = await this.analyze(videoElement);
-          if (running) onResult(result);
+        try {
+          if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && !videoElement.paused) {
+            const result = await this.analyze(videoElement);
+            if (running) onResult(result);
+          }
+        } catch (err) {
+          console.warn('[FaceAPI] Detection tick warning:', err);
         }
         await new Promise(r => setTimeout(r, intervalMs));
       }

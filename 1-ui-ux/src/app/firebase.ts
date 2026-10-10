@@ -14,6 +14,15 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
+const requiredFirebaseFields = ['apiKey', 'authDomain', 'projectId', 'storageBucket', 'messagingSenderId', 'appId'] as const;
+const missingFirebaseFields = requiredFirebaseFields.filter(field => {
+  const value = firebaseConfig[field];
+  return typeof value !== 'string' || !value.trim();
+});
+if (missingFirebaseFields.length) {
+  throw new Error(`Missing Firebase web configuration: ${missingFirebaseFields.join(', ')}. Set the VITE_FIREBASE_* variables.`);
+}
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 

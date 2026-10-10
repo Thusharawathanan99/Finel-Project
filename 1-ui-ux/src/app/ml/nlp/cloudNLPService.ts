@@ -20,7 +20,7 @@ export interface CloudNLPResult {
   processingTimeMs: number;
 }
 
-const HEALTHCARE_NLP_ENDPOINT = 'https://healthcare.googleapis.com/v1';
+import { apiPost } from '../../services/apiService';
 const CLOUD_NLP_AUTH_COOLDOWN_MS = Number(import.meta.env.VITE_CLOUD_NLP_AUTH_COOLDOWN_MS || 1800000);
 let cloudNlpDisabledUntil = 0;
 
@@ -30,8 +30,8 @@ let cloudNlpDisabledUntil = 0;
  */
 export async function analyzeWithCloudNLP(
   text: string,
-  projectId?: string,
-  apiKey?: string
+  _projectId?: string,
+  _apiKey?: string
 ): Promise<CloudNLPResult> {
   const startTime = performance.now();
 
@@ -43,37 +43,8 @@ export async function analyzeWithCloudNLP(
     return { entities: [], rawResponse: { skipped: 'cloud-nlp-cooldown' }, processingTimeMs: 0 };
   }
 
-  const _projectId = projectId || import.meta.env.VITE_GOOGLE_CLOUD_PROJECT_ID;
-  const _apiKey = apiKey || import.meta.env.VITE_GOOGLE_CLOUD_API_KEY;
-
-  if (!_projectId || !_apiKey) {
-    console.warn('[CloudNLP] Missing API credentials, skipping cloud analysis');
-    return { entities: [], rawResponse: null, processingTimeMs: 0 };
-  }
-
   try {
-    const url = `${HEALTHCARE_NLP_ENDPOINT}/projects/${_projectId}/locations/us-central1/services/nlp:analyzeEntities?key=${_apiKey}`;
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        nlpService: `projects/${_projectId}/locations/us-central1/services/nlp`,
-        documentContent: text,
-      }),
-    });
-
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        cloudNlpDisabledUntil = Date.now() + CLOUD_NLP_AUTH_COOLDOWN_MS;
-        console.warn('[CloudNLP] Unauthorized response. Temporarily disabling Cloud NLP to avoid repeated failing requests.');
-      }
-      throw new Error(`Healthcare NLP API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await apiPost<any>('/ai/cloud-nlp', { text });
     const processingTimeMs = performance.now() - startTime;
 
     // Parse the response entities
@@ -99,6 +70,7 @@ export async function analyzeWithCloudNLP(
 
     return { entities, rawResponse: data, processingTimeMs };
   } catch (error) {
+    if ([401, 403, 503].includes((error as any)?.status)) cloudNlpDisabledUntil = Date.now() + CLOUD_NLP_AUTH_COOLDOWN_MS;
     console.error('[CloudNLP] API call failed:', error);
     return {
       entities: [],
@@ -143,7 +115,5 @@ function extractLinkedAttribute(
  */
 export function isCloudNLPEnabled(): boolean {
   return import.meta.env.VITE_ENABLE_CLOUD_NLP === 'true' &&
-         !!import.meta.env.VITE_GOOGLE_CLOUD_API_KEY &&
-         !!import.meta.env.VITE_GOOGLE_CLOUD_PROJECT_ID &&
          Date.now() >= cloudNlpDisabledUntil;
 }

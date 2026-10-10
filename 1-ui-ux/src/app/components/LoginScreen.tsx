@@ -26,7 +26,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
   const getRoleColor = (role: UserRole) => {
     switch (role) {
       case 'patient':
-        return 'from-blue-200 to-blue-300';
+        return 'from-teal-200 to-teal-300';
       case 'caretaker':
         return 'from-green-200 to-green-300';
       case 'admin':
@@ -46,11 +46,11 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 flex items-center justify-center p-6">
+    <div className="min-h-screen bg-gradient-to-br from-teal-50 via-purple-50 to-pink-50 flex items-center justify-center p-6">
       <div className="max-w-4xl w-full">
         <div className="text-center mb-12">
           <div className="inline-block p-4 bg-white rounded-2xl shadow-lg mb-4">
-            <Heart className="w-16 h-16 text-blue-400" />
+            <Heart className="w-16 h-16 text-teal-400" />
           </div>
           <h1 className="text-3xl font-bold text-gray-800 mb-2">
             Smart Healthcare System
@@ -68,7 +68,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
               <button
                 key={user.userId}
                 onClick={() => onLogin(user)}
-                className="group relative overflow-hidden rounded-xl p-6 border-2 border-gray-200 hover:border-blue-300 transition-all hover:shadow-lg bg-gradient-to-br hover:scale-105"
+                className="group relative overflow-hidden rounded-xl p-6 border-2 border-gray-200 hover:border-teal-300 transition-all hover:shadow-lg bg-gradient-to-br hover:scale-105"
               >
                 <div className={`absolute inset-0 bg-gradient-to-br ${getRoleColor(user.role)} opacity-10 group-hover:opacity-20 transition-opacity`} />
                 
@@ -93,8 +93,8 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             ))}
           </div>
 
-          <div className="mt-8 p-4 bg-blue-50 rounded-lg border border-blue-200">
-            <p className="text-sm text-blue-900 text-center">
+          <div className="mt-8 p-4 bg-teal-50 rounded-lg border border-teal-200">
+            <p className="text-sm text-teal-900 text-center">
               <span className="font-medium">Demo Mode:</span> Click any role to explore the system
             </p>
           </div>

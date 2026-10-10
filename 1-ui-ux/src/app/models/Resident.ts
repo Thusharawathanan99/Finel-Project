@@ -73,7 +73,7 @@ export class Resident {
 
   getLatestEmotionalState(): EmotionalState | null {
     if (this.emotionalStates.length === 0) return null;
-    return this.emotionalStates.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())[0];
+    return this.emotionalStates.reduce((latest, state) => state.timestamp > latest.timestamp ? state : latest);
   }
 
   getAllMedications() {

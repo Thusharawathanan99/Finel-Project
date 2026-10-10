@@ -1,6 +1,7 @@
+import { analyzeAcousticSamples } from '../../../../../shared/experimentalWellness';
 /**
  * Vocal Tone Analysis Engine
- * Uses TensorFlow.js and the Web Audio API for vocal tone classification.
+ * Uses acoustic heuristics and the Web Audio API; scores are not clinical measurements.
  * Analyzes pitch, energy, and spectral features to determine emotional tone.
  */
 
@@ -10,8 +11,12 @@ export interface VocalToneResult {
   dominant: VocalToneCategory;
   scores: Record<VocalToneCategory, number>;
   wellnessScore: number;
+  stabilityScore: number;
+  distressScore: number;
   features: AudioFeatures;
   processingTimeMs: number;
+  needsReview: boolean;
+  analysisKind: 'acoustic-heuristic';
 }
 
 export interface AudioFeatures {
@@ -37,6 +42,7 @@ const TONE_WELLNESS_WEIGHTS: Record<VocalToneCategory, number> = {
 export class VocalToneEngine {
   private audioContext: AudioContext | null = null;
   private isInitialized: boolean = false;
+  private cancelRecording: (() => void) | null = null;
 
   constructor() {
     // AudioContext will be created on first use (requires user gesture)
@@ -61,43 +67,26 @@ export class VocalToneEngine {
     await this.initialize();
 
     const channelData = audioBuffer.getChannelData(0);
-    const sampleRate = audioBuffer.sampleRate;
-
-    // Extract audio features
-    const features = this.extractFeatures(channelData, sampleRate);
-
-    // Classify tone based on features
-    const scores = this.classifyTone(features);
-
-    // Find dominant tone
-    let dominant: VocalToneCategory = 'calm';
-    let maxScore = 0;
-    for (const [tone, score] of Object.entries(scores)) {
-      if (score > maxScore) {
-        maxScore = score;
-        dominant = tone as VocalToneCategory;
-      }
+    let sumSq = 0;
+    for (let i = 0; i < channelData.length; i++) {
+      const v = channelData[i];
+      if (!Number.isFinite(v)) throw new Error('No voiced speech was detected. Please provide a valid recording.');
+      sumSq += v * v;
     }
+    const rms = Math.sqrt(sumSq / (channelData.length || 1));
+    if (!channelData.length || rms < 0.003) throw new Error('No audible speech detected. Please provide a valid recording.');
 
-    // Compute wellness score
-    let wellnessScore = 0;
-    for (const [tone, probability] of Object.entries(scores)) {
-      wellnessScore += probability * TONE_WELLNESS_WEIGHTS[tone as VocalToneCategory];
+    let measured;
+    try {
+      measured = analyzeAcousticSamples(channelData, audioBuffer.sampleRate);
+    } catch {
+      throw new Error('No voiced speech was detected. Please provide a valid recording.');
     }
-    wellnessScore = Math.round(Math.max(0, Math.min(100, wellnessScore)));
-
-    const processingTimeMs = performance.now() - startTime;
-    console.log(`[VocalTone] Tone: ${dominant} (${(maxScore * 100).toFixed(1)}%) — wellness: ${wellnessScore}`);
-
-    return {
-      dominant,
-      scores,
-      wellnessScore,
-      features,
-      processingTimeMs,
-    };
+    const features = measured.features as unknown as AudioFeatures;
+    const dominant: VocalToneCategory = measured.stabilityScore >= 70 ? 'calm' : 'distressed';
+    const scores = Object.fromEntries(Object.keys(TONE_WELLNESS_WEIGHTS).map(key => [key, key === dominant ? 1 : 0])) as Record<VocalToneCategory, number>;
+    return { ...measured, dominant, scores, features, processingTimeMs: performance.now() - startTime };
   }
-
   /**
    * Analyze vocal tone from a File (WAV, MP3, etc.).
    */
@@ -113,43 +102,47 @@ export class VocalToneEngine {
    * Record audio from microphone and analyze.
    * Returns a promise that resolves after the specified duration.
    */
-  async recordAndAnalyze(durationMs: number = 5000): Promise<VocalToneResult> {
+  async recordAndAnalyze(durationMs: number = 5000, signal?: AbortSignal): Promise<VocalToneResult> {
     await this.initialize();
-
+    if (!Number.isFinite(durationMs) || durationMs < 500 || durationMs > 30000) throw new Error('Record between 0.5 and 30 seconds.');
+    if (signal?.aborted) throw new Error('Recording cancelled.');
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mediaRecorder = new MediaRecorder(stream);
-    const chunks: Blob[] = [];
-
+    if (signal?.aborted) { stream.getTracks().forEach(track => track.stop()); throw new Error('Recording cancelled.'); }
+    let recorder: MediaRecorder;
+    try { recorder = new MediaRecorder(stream); } catch (error) { stream.getTracks().forEach(track => track.stop()); throw error; }
+    const context = this.audioContext!;
     return new Promise((resolve, reject) => {
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
+      const chunks: Blob[] = [];
+      let timer: ReturnType<typeof setTimeout>, finished = false;
+      const cleanup = () => { clearTimeout(timer); stream.getTracks().forEach(track => track.stop()); signal?.removeEventListener('abort', cancel); this.cancelRecording = null; };
+      const fail = (error: unknown) => { if (finished) return; finished = true; cleanup(); reject(error); };
+      const cancel = () => { recorder.onstop = null; if (recorder.state !== 'inactive') recorder.stop(); fail(new Error('Recording cancelled.')); };
+      this.cancelRecording = cancel; signal?.addEventListener('abort', cancel, { once: true });
+      recorder.onerror = () => fail(new Error('Audio recording failed. Record again.'));
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      recorder.onstop = async () => {
+        cleanup();
+        try { const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+          const buffer = await context.decodeAudioData(await blob.arrayBuffer());
+          if (signal?.aborted || finished) throw new Error('Recording cancelled.');
+          const result = await this.analyzeBuffer(buffer); finished = true; resolve(result);
+        } catch (error) { fail(error); }
       };
-
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        try {
-          const blob = new Blob(chunks, { type: 'audio/webm' });
-          const arrayBuffer = await blob.arrayBuffer();
-          const audioBuffer = await this.audioContext!.decodeAudioData(arrayBuffer);
-          const result = await this.analyzeBuffer(audioBuffer);
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        }
-      };
-
-      mediaRecorder.start();
-      setTimeout(() => mediaRecorder.stop(), durationMs);
+      try { recorder.start(); timer = setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, durationMs); }
+      catch (error) { fail(error); }
     });
   }
 
-  /**
-   * Extract audio features from raw sample data.
-   */
-  private extractFeatures(samples: Float32Array, sampleRate: number): AudioFeatures {
+  dispose(): void {
+    this.cancelRecording?.();
+    void this.audioContext?.close().catch(() => {});
+    this.audioContext = null; this.isInitialized = false;
+  }
+
+  /** Legacy feature helpers retained for compatible callers. */  private extractFeatures(samples: Float32Array, sampleRate: number): AudioFeatures {
     const frameSize = 2048;
     const hopSize = 512;
-    const numFrames = Math.floor((samples.length - frameSize) / hopSize);
+    const numFrames = Math.max(0, 1 + Math.floor((samples.length - frameSize) / hopSize));
 
     // --- Pitch estimation via autocorrelation ---
     const pitches: number[] = [];
@@ -346,11 +339,4 @@ export class VocalToneEngine {
     return this.isInitialized;
   }
 
-  async dispose(): Promise<void> {
-    if (this.audioContext) {
-      await this.audioContext.close();
-      this.audioContext = null;
-    }
-    this.isInitialized = false;
-  }
 }

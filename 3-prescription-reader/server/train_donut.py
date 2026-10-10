@@ -24,6 +24,7 @@ import random
 import argparse
 import logging
 from pathlib import Path
+from training_safety import split_unique_samples, image_sample_id, optimizer_update_due, accumulation_group_size, optimizer_steps_per_epoch
 from datetime import datetime
 
 import torch
@@ -70,6 +71,7 @@ except NameError:
     BASE_DIR = Path.cwd()
 
 OUTPUT_DIR = BASE_DIR / "models" / "donut-prescription"
+TRAINING_SPLIT_MANIFEST = None
 CHECKPOINT_DIR = BASE_DIR / "checkpoints"
 RESEARCH_DIR = BASE_DIR / "research"
 
@@ -240,12 +242,8 @@ def load_hf_dataset(processor, train_split=0.9):
 
     log.info(f"   Total samples: {len(data_list)}")
 
-    # Split into train/val
-    random.shuffle(data_list)
-    split_idx = int(len(data_list) * train_split)
-    train_data = data_list[:split_idx]
-    val_data = data_list[split_idx:]
-
+    global TRAINING_SPLIT_MANIFEST
+    train_data, val_data, TRAINING_SPLIT_MANIFEST = split_unique_samples(data_list, train_split)
     log.info(f"   Train: {len(train_data)}, Val: {len(val_data)}")
 
     train_dataset = PrescriptionDataset(train_data, processor, split="train")
@@ -320,11 +318,13 @@ def train(args):
         log.info(f"📂 Loading custom dataset from: {args.custom_data}")
         full_dataset = CustomPrescriptionDataset(args.custom_data, processor)
         # Split 90/10
-        train_size = int(0.9 * len(full_dataset))
-        val_size = len(full_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size]
-        )
+        global TRAINING_SPLIT_MANIFEST
+        train_samples, heldout_samples, TRAINING_SPLIT_MANIFEST = split_unique_samples(full_dataset.samples)
+        train_dataset = CustomPrescriptionDataset(args.custom_data, processor)
+        val_dataset = CustomPrescriptionDataset(args.custom_data, processor)
+        train_dataset.samples = train_samples
+        val_dataset.samples = heldout_samples
+
     else:
         train_dataset, val_dataset = load_hf_dataset(processor)
 
@@ -350,7 +350,7 @@ def train(args):
         weight_decay=TRAIN_CONFIG["weight_decay"],
     )
 
-    total_steps = len(train_loader) * TRAIN_CONFIG["epochs"]
+    total_steps = optimizer_steps_per_epoch(len(train_loader), TRAIN_CONFIG["gradient_accumulation_steps"]) * TRAIN_CONFIG["epochs"]
     scheduler = get_scheduler(
         "cosine",
         optimizer=optimizer,
@@ -382,6 +382,7 @@ def train(args):
 
     for epoch in range(1, TRAIN_CONFIG["epochs"] + 1):
         model.train()
+        optimizer.zero_grad()
         epoch_loss = 0
         step_count = 0
 
@@ -395,14 +396,14 @@ def train(args):
             if use_fp16:
                 with torch.amp.autocast('cuda'):
                     outputs = model(pixel_values=pixel_values, labels=labels)
-                    loss = outputs.loss / grad_accum_steps
+                    loss = outputs.loss / accumulation_group_size(batch_idx, len(train_loader), grad_accum_steps)
                 scaler.scale(loss).backward()
             else:
                 outputs = model(pixel_values=pixel_values, labels=labels)
-                loss = outputs.loss / grad_accum_steps
+                loss = outputs.loss / accumulation_group_size(batch_idx, len(train_loader), grad_accum_steps)
                 loss.backward()
 
-            if (batch_idx + 1) % grad_accum_steps == 0:
+            if optimizer_update_due(batch_idx, len(train_loader), grad_accum_steps):
                 if use_fp16:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -549,6 +550,8 @@ def save_model(model, processor, output_path):
     """Save model and processor to disk."""
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
+    if TRAINING_SPLIT_MANIFEST is not None:
+        (output_path / "training_split.json").write_text(json.dumps(TRAINING_SPLIT_MANIFEST, indent=2), encoding="utf-8")
     model.save_pretrained(str(output_path))
     processor.save_pretrained(str(output_path))
     log.info(f"   💾 Model saved to: {output_path}")

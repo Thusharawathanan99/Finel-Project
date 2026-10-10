@@ -1,35 +1,47 @@
-import { useState, useEffect } from 'react';
-import { loadSavedMealPlan } from '../ml/meal-plan/MealPlanEngine';
+import { useState, useEffect, useRef } from 'react';
+import { loadSavedMealPlan, type MealPlanRequest } from '../ml/meal-plan/MealPlanEngine';
 import { WeeklyMealPlan, DailyMealPlan } from '../ml/meal-plan/MealPlan';
 import { Resident } from '../models/Resident';
 import { Loader2, Info, Utensils, Beaker } from 'lucide-react';
 
 interface MealPlanViewProps {
   resident: Resident;
+  onGenerate?: () => Promise<WeeklyMealPlan | null>;
 }
 
-export function MealPlanView({ resident }: MealPlanViewProps) {
+export function MealPlanView({ resident, onGenerate }: MealPlanViewProps) {
   const [mealPlan, setMealPlan] = useState<WeeklyMealPlan | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<number>(0); // 0 = Monday, etc.
 
-  const medCount = resident.getAllMedications().length;
+  const [generating, setGenerating] = useState(false);
+  const requestVersion = useRef(0);
+
+  const context: MealPlanRequest = {
+    residentId:resident.residentId,residentName:resident.name,age:resident.age,
+    medications:resident.getAllMedications().map(m=>({name:m.drugName,dosage:m.dosage,frequency:m.frequency})),
+    allergies:resident.personalDetails.allergies||[],medicalHistory:resident.personalDetails.medicalHistory||'',
+    dietaryRestrictions:resident.personalDetails.dietaryRestrictions||[],
+  };
+  const contextVersion = JSON.stringify(context);
 
   /**
    * Load meal plan from DB only (read-only for patients).
    * Caretaker generates plans; patient can only view.
    */
-  const loadMealPlan = async () => {
+  const loadMealPlan = async (version: number) => {
     setLoading(true);
     setError(null);
+    setMealPlan(null);
+    setSelectedDay(0);
     try {
-      const savedPlan = await loadSavedMealPlan(resident.residentId, medCount);
-      if (savedPlan) {
-        setMealPlan(savedPlan);
-      }
+      const savedPlan = await loadSavedMealPlan(resident.residentId, context);
+      if (version !== requestVersion.current) return;
+      setMealPlan(savedPlan);
       setLoading(false);
     } catch (err: any) {
+      if (version !== requestVersion.current) return;
       console.error('Failed to load meal plan:', err);
       setError(err?.message || 'Failed to load meal plan');
       setLoading(false);
@@ -37,9 +49,33 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
   };
 
   useEffect(() => {
-    loadMealPlan();
+    const version = ++requestVersion.current;
+    setGenerating(false);
+    void loadMealPlan(version);
+    return () => { requestVersion.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resident.residentId, medCount]);
+  }, [resident.residentId, contextVersion]);
+
+  const handleGenerate = async () => {
+    if (!onGenerate || generating) return;
+    const version = ++requestVersion.current;
+    setGenerating(true);
+    setError(null);
+    try {
+      const plan = await onGenerate();
+      if (version !== requestVersion.current) return;
+      if (!plan) throw new Error('Meal plan could not be generated. Please try again.');
+      setMealPlan(plan);
+      setSelectedDay(0);
+    } catch (error) {
+      if (version !== requestVersion.current) return;
+      setError(error instanceof Error ? error.message : 'Meal plan could not be saved. Please try again.');
+    } finally {
+      if (version === requestVersion.current) setGenerating(false);
+    }
+  };
+
+  const generationControls = onGenerate && <button type="button" onClick={handleGenerate} disabled={generating} className="w-full rounded-xl bg-orange-500 px-4 py-3 font-semibold text-white disabled:opacity-50">{generating ? 'Preparing and saving...' : mealPlan ? 'Generate New Meal Plan' : 'Generate Meal Plan'}</button>;
 
   if (loading) {
     return (
@@ -53,12 +89,14 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
     );
   }
 
-  if (error || !mealPlan) {
+  if (!mealPlan) {
     return (
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 text-center">
         <Utensils className="w-12 h-12 text-gray-300 mx-auto mb-4" />
         <h3 className="text-lg font-bold text-gray-800 mb-2">No Meal Plan Available</h3>
-        <p className="text-gray-500">Your caretaker will generate a personalized meal plan based on your medications.</p>
+        <p className="text-gray-500">{onGenerate ? 'Generate a personalized meal plan based on current medications.' : 'Your caretaker will generate a personalized meal plan based on your medications.'}</p>
+        {error && <p role="alert" className="mt-4 text-sm text-red-800">{error}</p>}
+        <div className="mt-4">{generationControls}</div>
       </div>
     );
   }
@@ -67,6 +105,9 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
 
   return (
     <div className="space-y-4">
+      <p role="note" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Review this proposed plan, its ingredients and medication guidance with your care team before using it.</p>
+      {generationControls}
+      {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
       {/* Header section */}
       <div className="bg-gradient-to-r from-orange-500 to-red-500 rounded-2xl shadow-md p-5 text-white">
         <h2 className="text-xl font-bold flex items-center gap-2">
@@ -141,7 +182,7 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
               { id: 'breakfast', label: 'Breakfast', meal: dayPlan.breakfast, color: 'bg-yellow-50', icon: '🌅' },
               { id: 'morningSnack', label: 'Morning Snack', meal: dayPlan.morningSnack, color: 'bg-green-50', icon: '🍎' },
               { id: 'lunch', label: 'Lunch', meal: dayPlan.lunch, color: 'bg-orange-50', icon: '🍲' },
-              { id: 'afternoonSnack', label: 'Afternoon Snack', meal: dayPlan.afternoonSnack, color: 'bg-blue-50', icon: '🥨' },
+              { id: 'afternoonSnack', label: 'Afternoon Snack', meal: dayPlan.afternoonSnack, color: 'bg-teal-50', icon: '🥨' },
               { id: 'dinner', label: 'Dinner', meal: dayPlan.dinner, color: 'bg-purple-50', icon: '🍽️' },
             ].map(({ id, label, meal, color, icon }) => (
               <div key={id} className={`rounded-xl p-4 shadow-sm border ${color.replace('bg-', 'border-').replace('50', '200')} ${color}`}>
@@ -157,7 +198,7 @@ export function MealPlanView({ resident }: MealPlanViewProps) {
                 
                 {meal.rationale && (
                   <div className="mt-2 bg-white/60 rounded p-2 text-xs text-gray-700 flex items-start gap-1">
-                    <Info className="w-3.5 h-3.5 mt-0.5 text-blue-500 flex-shrink-0" />
+                    <Info className="w-3.5 h-3.5 mt-0.5 text-teal-500 flex-shrink-0" />
                     <span>{meal.rationale}</span>
                   </div>
                 )}

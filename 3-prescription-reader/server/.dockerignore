@@ -5,6 +5,10 @@ __pycache__
 .venv-donut
 *.egg-info
 .env
+serviceAccountKey.json
+*service-account*.json
+*.pem
+*.key
 .git
 data
 models

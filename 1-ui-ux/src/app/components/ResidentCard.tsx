@@ -14,15 +14,15 @@ export function ResidentCard({ resident, onSelect, isSelected }: ResidentCardPro
   return (
     <div
       onClick={onSelect}
-      className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
+      className={`p-5 rounded-2xl border-2 cursor-pointer transition-all shadow-sm hover:shadow-md ${
         isSelected 
-          ? 'border-blue-500 bg-blue-50' 
+          ? 'border-teal-500 bg-teal-50' 
           : 'border-gray-200 bg-white hover:border-gray-300'
       }`}
     >
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-teal-500 to-emerald-700 flex items-center justify-center">
             <User className="w-6 h-6 text-white" />
           </div>
           <div>
@@ -34,7 +34,7 @@ export function ResidentCard({ resident, onSelect, isSelected }: ResidentCardPro
 
       <div className="grid grid-cols-2 gap-2 mt-3">
         <div className="flex items-center gap-2 text-sm">
-          <Pill className="w-4 h-4 text-blue-600" />
+          <Pill className="w-4 h-4 text-teal-600" />
           <span>{medicationCount} medications</span>
         </div>
         <div className="flex items-center gap-2 text-sm">
@@ -54,7 +54,7 @@ export function ResidentCard({ resident, onSelect, isSelected }: ResidentCardPro
             <div
               className={`h-full transition-all ${
                 latestEmotion.stateScore >= 80 ? 'bg-green-500' :
-                latestEmotion.stateScore >= 60 ? 'bg-blue-500' :
+                latestEmotion.stateScore >= 60 ? 'bg-teal-500' :
                 latestEmotion.stateScore >= 40 ? 'bg-yellow-500' :
                 latestEmotion.stateScore >= 20 ? 'bg-orange-500' :
                 'bg-red-500'

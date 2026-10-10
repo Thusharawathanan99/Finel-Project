@@ -1,11 +1,12 @@
+import './db.js'; // Loads configuration relative to the module, independent of cwd.
 import mysql from 'mysql2/promise';
 
 async function verify() {
   const connection = await mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'Nadun@123',
-    database: 'careconnect',
+    host: process.env.MYSQL_HOST || 'localhost', port: Number(process.env.MYSQL_PORT || 3306),
+    user: process.env.MYSQL_USER || 'root',
+    password: process.env.MYSQL_PASSWORD ?? '',
+    database: process.env.MYSQL_DATABASE || 'careconnect',
   });
 
   console.log('✅ Connected to careconnect database\n');

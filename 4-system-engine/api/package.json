@@ -8,7 +8,10 @@
     "dev": "node --watch index.js",
     "start": "node index.js",
     "db:setup": "node setup_db.js",
-    "db:seed": "node setup_db.js",
+    "db:setup:dry": "node setup_db.js --dry-run",
+    "db:seed": "node setup_db.js --seed --confirm",
+    "test": "node --experimental-vm-modules tests/security.test.mjs",
+    "admin:bootstrap": "node bootstrap_admin.js",
     "caretakers:reset:dry": "node reset_caretakers.js --dry-run",
     "caretakers:reset": "node reset_caretakers.js --confirm",
     "caretakers:reset:dry:firebase": "node reset_caretakers.js --dry-run --with-firebase",
@@ -20,6 +23,11 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "firebase-admin": "^13.0.2",
+    "google-auth-library": "^10.9.1",
     "mysql2": "^3.12.0"
+  },
+  "overrides": {
+    "qs": "^6.16.0",
+    "uuid": "11.1.1"
   }
 }

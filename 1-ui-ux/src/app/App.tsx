@@ -1,172 +1,36 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense, type ReactNode } from 'react';
 import { Dashboard } from './models/Dashboard';
 import { Resident } from './models/Resident';
 import { Prescription } from './models/Prescription';
 import { Medication } from './models/Medication';
 import { EmotionalState } from './models/EmotionalState';
-import { Caretaker, LeaveRequest } from './models/Caretaker';
+import { Caretaker } from './models/Caretaker';
 import { SystemComponent } from './models/SystemComponent';
 import { User } from './models/User';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { SignInSignUp } from './components/SignInSignUp';
-import { PatientDashboard } from './components/PatientDashboard';
-import { CaretakerDashboard } from './components/CaretakerDashboard';
-import { AdminDashboard } from './components/AdminDashboard';
 import { onAuthStateChange, fetchUserProfile, signOut } from './services/firebaseAuthService';
-import { residentsApi, caretakersApi, systemApi } from './services/apiService';
+import { loadDashboardSnapshot, publishDashboardSnapshot } from './services/dashboardLoader';
+import { auth } from './firebase';
+import { datasetCollector } from './ml/dataset/DatasetCollector';
+import { modelAccuracyTracker } from './ml/ensemble/ModelAccuracyTracker';
+import { clearAllMealPlanCaches } from './ml/meal-plan/MealPlanEngine';
 
-/**
- * Load dashboard data from MySQL API.
- * Falls back to empty dashboard if API is unavailable.
- */
-const loadDashboardFromAPI = async (dashboard: Dashboard): Promise<void> => {
-  try {
-    // Load residents with prescriptions and emotional states
-    const residentsData = await residentsApi.getAll();
-    for (const r of residentsData) {
-      // Fetch full resident details (with prescriptions + emotions)
-      try {
-        const fullResident = await residentsApi.getById(r.resident_id);
-        const resident = new Resident(fullResident.resident_id, fullResident.name, fullResident.age || 0);
+const PatientDashboard = lazy(() => import('./components/PatientDashboard').then(module => ({ default: module.PatientDashboard })));
+const CaretakerDashboard = lazy(() => import('./components/CaretakerDashboard').then(module => ({ default: module.CaretakerDashboard })));
+const AdminDashboard = lazy(() => import('./components/AdminDashboard').then(module => ({ default: module.AdminDashboard })));
 
-        // Map personal details
-        resident.updatePersonalDetails({
-          dateOfBirth: fullResident.date_of_birth ? new Date(fullResident.date_of_birth) : undefined,
-          address: fullResident.address || undefined,
-          city: fullResident.city || undefined,
-          state: fullResident.state || undefined,
-          zipCode: fullResident.zip_code || undefined,
-          emergencyContactName: fullResident.emergency_contact_name || undefined,
-          emergencyContactPhone: fullResident.emergency_contact_phone || undefined,
-          emergencyContactRelation: fullResident.emergency_contact_relation || undefined,
-          children: fullResident.children ? (typeof fullResident.children === 'string' ? JSON.parse(fullResident.children) : fullResident.children) : undefined,
-          roomNumber: fullResident.room_number || undefined,
-          floorNumber: fullResident.floor_number || undefined,
-          admissionDate: fullResident.admission_date ? new Date(fullResident.admission_date) : undefined,
-          medicalHistory: fullResident.medical_history || undefined,
-          allergies: fullResident.allergies ? (typeof fullResident.allergies === 'string' ? JSON.parse(fullResident.allergies) : fullResident.allergies) : undefined,
-          dietaryRestrictions: fullResident.dietary_restrictions ? (typeof fullResident.dietary_restrictions === 'string' ? JSON.parse(fullResident.dietary_restrictions) : fullResident.dietary_restrictions) : undefined,
-        });
+type AppScreen = 'welcome' | 'auth' | 'app' | 'loading' | 'error';
 
-        // Map prescriptions
-        if (fullResident.prescriptions) {
-          for (const rx of fullResident.prescriptions) {
-            const prescription = new Prescription(
-              rx.prescription_id,
-              new Date(rx.date_issued),
-              rx.doctor_name || ''
-            );
-            if (rx.medications) {
-              for (const med of rx.medications) {
-                prescription.addMedication(new Medication(med.drug_name, med.dosage || '', med.frequency || '', med.id));
-              }
-            }
-            resident.addPrescription(prescription);
-          }
-        }
+const initialPublicScreen = (): AppScreen => {
+  if (typeof window === 'undefined') return 'welcome';
+  return ['#/auth', '#/app'].includes(window.location.hash) ? 'auth' : 'welcome';
+};
 
-        // Map emotional states
-        if (fullResident.emotionalStates) {
-          for (const es of fullResident.emotionalStates) {
-            resident.addEmotionalState(new EmotionalState(
-              new Date(es.recorded_at),
-              es.state_score
-            ));
-          }
-        }
-
-        // Map finished medications history
-        if (fullResident.finishedMedications) {
-          resident.finishedMedications = fullResident.finishedMedications.map((fm: any) => ({
-            id: fm.id,
-            residentId: fm.resident_id,
-            prescriptionId: fm.prescription_id,
-            drugName: fm.drug_name,
-            dosage: fm.dosage || '',
-            frequency: fm.frequency || '',
-            finishedAt: new Date(fm.finished_at),
-          }));
-        }
-
-        dashboard.addResident(resident);
-      } catch (err) {
-        console.warn(`[App] Failed to load resident ${r.resident_id}:`, err);
-      }
-    }
-
-    // Load caretakers
-    const caretakersData = await caretakersApi.getAll();
-    for (const c of caretakersData) {
-      const caretaker = new Caretaker(
-        c.caretaker_id,
-        c.name,
-        c.email || '',
-        c.phone || '',
-        c.specialization || ''
-      );
-      // Map assigned residents
-      if (c.assigned_residents) {
-        const residents = typeof c.assigned_residents === 'string'
-          ? JSON.parse(c.assigned_residents)
-          : c.assigned_residents;
-        if (Array.isArray(residents)) {
-          caretaker.assignedResidents = residents.filter(Boolean);
-        }
-      }
-      dashboard.addCaretaker(caretaker);
-    }
-
-    try {
-      // Load all leave requests globally
-      const allLeaveRequests = await caretakersApi.getAllLeaveRequests();
-      for (const req of allLeaveRequests) {
-        const caretaker = dashboard.getCaretaker(req.caretaker_id);
-        if (caretaker) {
-          // Avoid duplicate requests during re-renders/HMR
-          if (!caretaker.leaveRequests.some((lr: any) => lr.requestId === req.request_id)) {
-            const leaveReq = new LeaveRequest(
-              req.request_id,
-              req.caretaker_id,
-              req.caretaker_name || caretaker.name,
-              new Date(req.start_date),
-              new Date(req.end_date),
-              req.reason || ''
-            );
-            
-            // Map the remaining properties from the database since the constructor defaults to 'pending'
-            leaveReq.status = req.status as 'pending' | 'approved' | 'rejected';
-            leaveReq.requestDate = new Date(req.request_date);
-            leaveReq.reviewedBy = req.reviewed_by || undefined;
-            leaveReq.reviewDate = req.review_date ? new Date(req.review_date) : undefined;
-            leaveReq.temporaryReplacement = req.temporary_replacement || undefined;
-
-            caretaker.addLeaveRequest(leaveReq);
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[App] Failed to load global leave requests:', err);
-    }
-
-    // Load system components
-    const componentsData = await systemApi.getComponents();
-    for (const comp of componentsData) {
-      dashboard.addSystemComponent(new SystemComponent(
-        comp.component_id,
-        comp.name,
-        comp.version || '',
-        comp.description || '',
-        comp.status || 'online'
-      ));
-    }
-
-    // Generate alerts based on loaded data
-    dashboard.refreshAlerts();
-
-    console.log(`✅ Dashboard loaded from API: ${dashboard.residents.length} residents, ${dashboard.caretakers.length} caretakers`);
-  } catch (err) {
-    console.warn('[App] API unavailable, using empty dashboard. Error:', err);
-  }
+const screenHash = (screen: AppScreen): string => {
+  if (screen === 'welcome') return '#/welcome';
+  if (screen === 'auth') return '#/auth';
+  return '#/app';
 };
 
 /**
@@ -261,24 +125,34 @@ const initializeDemoData = (dashboard: Dashboard): void => {
 };
 
 export default function App() {
-  const [dashboard] = useState<Dashboard>(() => new Dashboard());
-  const [currentScreen, setCurrentScreen] = useState<'welcome' | 'auth' | 'app' | 'loading'>('welcome');
+  const [currentScreen, setCurrentScreen] = useState<AppScreen>(initialPublicScreen);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  // useRef for synchronous flags — useState is async and causes race conditions
-  // with Firebase's onAuthStateChanged which fires immediately during signup
-  const authInProgressRef = useRef(false);
-  const dataLoadedRef = useRef(false);
-  const dataLoadInProgressRef = useRef(false);
+  const [dashboard] = useState<Dashboard>(() => new Dashboard());
+  const [, setRevision] = useState(0);
+  const [loadError, setLoadError] = useState('');
+  const sessionVersion = useRef(0);
+  const activeIdentity = useRef<string | null>(null);
   const currentScreenRef = useRef(currentScreen);
+  const restoreFromInitialAuthRoute = useRef(currentScreen === 'auth');
+  const retryAction = useRef<(() => Promise<void>) | null>(null);
+  const refreshInFlight = useRef(false);
+  const refreshGeneration = useRef(0);
+  const refreshAgain = useRef(false);
+  const [refreshError, setRefreshError] = useState('');
 
-  useEffect(() => {
-    currentScreenRef.current = currentScreen;
-  }, [currentScreen]);
+  const showScreen = (screen: AppScreen, historyMode: 'replace' | 'push' = 'replace') => {
+    currentScreenRef.current = screen;
+    setCurrentScreen(screen);
+    if (typeof window !== 'undefined') {
+      const hash = screenHash(screen);
+      if (window.location.hash !== hash) {
+        window.history[historyMode === 'push' ? 'pushState' : 'replaceState'](null, '', hash);
+      }
+    }
+  };
 
-  /** Clear all dashboard arrays to prevent duplicate accumulation */
   const clearDashboard = () => {
+    dashboard.clearPendingPrescriptionDrafts();
     dashboard.residents = [];
     dashboard.caretakers = [];
     dashboard.alerts = [];
@@ -287,196 +161,221 @@ export default function App() {
     dashboard.emergencyAlerts = [];
   };
 
-  // Listen for Firebase auth state changes (handles page reload / returning users only)
-  useEffect(() => {
-    const unsubscribe = onAuthStateChange(async (firebaseUser) => {
-      // Skip if a signup/signin is actively being handled by handleAuthComplete
-      if (authInProgressRef.current) return;
-      // While user is on the auth screen, let SignInSignUp own the flow.
-      if (currentScreenRef.current === 'auth') return;
-      // Skip if data is already loaded (prevents duplicate loading)
-      if (dataLoadedRef.current) return;
-      // Skip if another async load is already running.
-      if (dataLoadInProgressRef.current) return;
-
-      if (firebaseUser) {
-        // Returning user detected (page reload / existing session)
-        try {
-          setCurrentScreen('loading');
-          const appUser = await fetchUserProfile(firebaseUser);
-
-          const user: User = {
-            userId: appUser.uid,
-            name: appUser.name,
-            email: appUser.email,
-            role: appUser.role,
-            residentId: appUser.residentId,
-          };
-
-          // Load dashboard data from API
-          if (!dataLoadedRef.current) {
-            dataLoadInProgressRef.current = true;
-            try {
-              clearDashboard();
-              await loadDashboardFromAPI(dashboard);
-              dataLoadedRef.current = true;
-            } finally {
-              dataLoadInProgressRef.current = false;
-            }
-          }
-
-          setCurrentUser(user);
-          setCurrentScreen('app');
-        } catch (err) {
-          console.error('[App] Auth state error:', err);
-          setCurrentScreen('auth');
-        }
+  const loadSession = async (user: User, version?: number): Promise<void> => {
+    if (user.userId !== 'DEMO' && auth.currentUser?.uid !== user.userId) {
+      throw new Error('Your signed-in account changed. Please sign in again.');
+    }
+    const loadVersion = version ?? ++sessionVersion.current;
+    clearAllMealPlanCaches();
+    setRefreshError('');
+    activeIdentity.current = user.userId;
+    datasetCollector?.setScope?.(user.userId === 'DEMO' ? null : user.userId);
+    modelAccuracyTracker?.setScope?.(user.userId === 'DEMO' ? null : user.userId);
+    setCurrentUser(null);
+    setLoadError('');
+    showScreen('loading');
+    retryAction.current = () => loadSession(user);
+    try {
+      let snapshot: Dashboard;
+      if (user.userId === 'DEMO') {
+        snapshot = new Dashboard();
+        initializeDemoData(snapshot);
+      } else {
+        snapshot = await loadDashboardSnapshot(user);
       }
-    });
+      if (loadVersion !== sessionVersion.current || (user.userId !== 'DEMO' && auth.currentUser?.uid !== user.userId)) return;
+      publishDashboardSnapshot(dashboard, snapshot);
+      setCurrentUser(user);
+      showScreen('app');
+    } catch (error) {
+      if (loadVersion !== sessionVersion.current || (user.userId !== 'DEMO' && auth.currentUser?.uid !== user.userId)) return;
+      clearDashboard();
+      setLoadError(error instanceof Error ? error.message : 'Your care information could not be loaded. Please try again.');
+      showScreen('error');
+    }
+  };
 
-    return () => unsubscribe();
+  useEffect(() => {
+    const restore = async (firebaseUser: Parameters<typeof fetchUserProfile>[0]) => {
+      const version = ++sessionVersion.current;
+      datasetCollector.setScope(null);
+      modelAccuracyTracker.setScope(null);
+      clearAllMealPlanCaches();
+      activeIdentity.current = firebaseUser.uid;
+      setCurrentUser(null);
+      clearDashboard();
+      setLoadError('');
+      showScreen('loading');
+      retryAction.current = () => restore(firebaseUser);
+      try {
+        const profile = await fetchUserProfile(firebaseUser);
+        if (version !== sessionVersion.current) return;
+        await loadSession({ userId: profile.uid, name: profile.name, email: profile.email, role: profile.role, residentId: profile.residentId }, version);
+      } catch (error) {
+        if (version !== sessionVersion.current) return;
+        setLoadError(error instanceof Error ? error.message : 'Your account could not be verified. Please try again.');
+        showScreen('error');
+      }
+    };
+    const unsubscribe = onAuthStateChange(firebaseUser => {
+      // Handle signout before duplicate-load checks, including signout during a request.
+      if (!firebaseUser) {
+        const hadSession = activeIdentity.current !== null;
+        restoreFromInitialAuthRoute.current = false;
+        sessionVersion.current++;
+        activeIdentity.current = null;
+        datasetCollector?.setScope?.(null);
+        modelAccuracyTracker?.setScope?.(null);
+        clearAllMealPlanCaches();
+        retryAction.current = null;
+        clearDashboard();
+        setCurrentUser(null);
+        if (hadSession || currentScreenRef.current === 'auth') showScreen('auth');
+        return;
+      }
+      // The registration form owns identity creation until its transaction is complete.
+      if (currentScreenRef.current === 'auth' && !restoreFromInitialAuthRoute.current) return;
+      restoreFromInitialAuthRoute.current = false;
+      if (activeIdentity.current === firebaseUser.uid) return;
+      void restore(firebaseUser);
+    });
+    return () => {
+      sessionVersion.current++;
+      unsubscribe();
+    };
   }, [dashboard]);
 
-  const handleWelcomeContinue = () => {
-    setCurrentScreen('auth');
-  };
-
-  const handleAuthComplete = async (user: User) => {
-    // Set synchronous flag BEFORE anything else — prevents onAuthStateChanged from racing
-    authInProgressRef.current = true;
-    setCurrentScreen('loading');
-
-    // Load data from API for real users, demo data for demo users
-    if (!dataLoadedRef.current) {
-      dataLoadInProgressRef.current = true;
-      try {
-        clearDashboard();
-        if (user.userId === 'DEMO') {
-          initializeDemoData(dashboard);
-        } else {
-          await loadDashboardFromAPI(dashboard);
-          // If API returned no data, fall back to demo data
-          if (dashboard.residents.length === 0) {
-            console.log('[App] No data from API, loading demo data');
-            initializeDemoData(dashboard);
-          }
-        }
-        dataLoadedRef.current = true;
-      } finally {
-        dataLoadInProgressRef.current = false;
+  useEffect(() => {
+    const handleBrowserNavigation = () => {
+      if (activeIdentity.current) {
+        window.history.replaceState(null, '', '#/app');
+        return;
       }
-    }
-
-    setCurrentUser(user);
-    setCurrentScreen('app');
-    authInProgressRef.current = false;
-  };
+      const screen = initialPublicScreen();
+      currentScreenRef.current = screen;
+      setCurrentScreen(screen);
+    };
+    window.addEventListener('popstate', handleBrowserNavigation);
+    window.addEventListener('hashchange', handleBrowserNavigation);
+    return () => {
+      window.removeEventListener('popstate', handleBrowserNavigation);
+      window.removeEventListener('hashchange', handleBrowserNavigation);
+    };
+  }, []);
 
   const handleLogout = async () => {
-    try {
-      await signOut();
-    } catch (err) {
-      console.warn('[App] Sign out error (may be demo user):', err);
-    }
+    // Invalidate pending profile/data requests synchronously before awaiting Firebase.
+    sessionVersion.current++;
+    activeIdentity.current = null;
+    datasetCollector?.setScope?.(null);
+    modelAccuracyTracker?.setScope?.(null);
+    clearAllMealPlanCaches();
+    retryAction.current = null;
+    clearDashboard();
     setCurrentUser(null);
-    dataLoadedRef.current = false;
-
-    // Clear dashboard data
-    dashboard.residents = [];
-    dashboard.caretakers = [];
-    dashboard.alerts = [];
-    dashboard.systemComponents = [];
-    dashboard.appointments = [];
-    dashboard.emergencyAlerts = [];
-
-    setCurrentScreen('auth');
+    showScreen('auth');
+    try { await signOut(); } catch (error) {
+      console.warn('[App] Sign out failed:', error);
+      setLoadError('Sign out could not be completed. Please retry.');
+      retryAction.current = handleLogout;
+      showScreen('error');
+    }
   };
 
+  const refreshRecords = async () => {
+    if (!currentUser || currentUser.userId === 'DEMO' || auth.currentUser?.uid !== currentUser.userId) return;
+    if (refreshInFlight.current) { refreshAgain.current=true; return; }
+    const uid = currentUser.userId;
+    const version = sessionVersion.current;
+    const generation = refreshGeneration.current;
+    refreshInFlight.current = true;
+    try {
+      const snapshot = await loadDashboardSnapshot(currentUser);
+      if (version !== sessionVersion.current || auth.currentUser?.uid !== uid || generation !== refreshGeneration.current) return;
+      publishDashboardSnapshot(dashboard, snapshot);
+      setRefreshError('');
+      setRevision(revision => revision + 1);
+    } catch (error) {
+      if (version === sessionVersion.current && generation === refreshGeneration.current) setRefreshError(error instanceof Error ? error.message : 'Care information could not be refreshed.');
+    } finally { refreshInFlight.current = false; if(refreshAgain.current) {refreshAgain.current=false;void refreshRecords();} }
+  };
   const handleRefresh = () => {
+    ++refreshGeneration.current;
     dashboard.refreshAlerts();
-    setRefreshKey(prev => prev + 1);
+    setRevision(revision => revision + 1);
+    void refreshRecords();
   };
 
-  // Loading screen
+  useEffect(() => {
+    if (currentScreen !== 'app' || !currentUser || currentUser.userId === 'DEMO') return;
+    const refresh = () => { if (document.visibilityState !== 'hidden') void refreshRecords(); };
+    const timer = setInterval(refresh, 20000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
+  }, [currentScreen, currentUser?.userId]);
+
   if (currentScreen === 'loading') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-purple-50">
-        <div className="text-center">
-          <div className="inline-block w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4"></div>
+      <div className="care-loading min-h-screen flex items-center justify-center bg-gradient-to-br from-teal-50 to-emerald-50">
+        <div className="text-center" role="status" aria-live="polite">
+          <div className="inline-block w-12 h-12 border-4 border-teal-200 border-t-teal-700 rounded-full animate-spin mb-4" aria-hidden="true" />
           <p className="text-gray-600 font-medium">Loading your dashboard...</p>
-          <p className="text-xs text-gray-400 mt-1">Connecting to database</p>
+          <p className="text-xs text-gray-400 mt-1">Connecting to your care information</p>
         </div>
       </div>
     );
   }
-
-  // Show welcome screen
-  if (currentScreen === 'welcome') {
-    return <WelcomeScreen onContinue={handleWelcomeContinue} />;
-  }
-
-  // Show auth (sign in/sign up) screen
-  if (currentScreen === 'auth') {
-    return <SignInSignUp onComplete={handleAuthComplete} />;
-  }
-
-  // Show app if user is logged in
-  if (currentScreen === 'app' && currentUser) {
-    // Route to appropriate dashboard based on user role
-    if (currentUser.role === 'patient') {
-      const resident = dashboard.getResident(currentUser.residentId || '');
-      if (!resident) {
-        return (
-          <div className="min-h-screen flex items-center justify-center bg-red-50">
-            <div className="text-center">
-              <p className="text-red-800 font-semibold">Error: Resident record not found</p>
-              <p className="text-sm text-red-600 mt-1">Resident ID: {currentUser.residentId || 'none'}</p>
-              <button
-                onClick={handleLogout}
-                className="mt-4 px-6 py-2 bg-red-600 text-white rounded-lg"
-              >
-                Return to Login
-              </button>
-            </div>
+  if (currentScreen === 'error') {
+    return (
+      <div className="care-error min-h-screen flex items-center justify-center bg-teal-50 p-6">
+        <div className="max-w-md rounded-2xl border border-teal-100 bg-white p-8 text-center shadow-sm">
+          <h1 className="text-xl font-semibold text-gray-800">We couldn't load your care information</h1>
+          <p role="alert" className="mt-3 text-sm text-gray-600">{loadError}</p>
+          <div className="mt-6 flex justify-center gap-3">
+            <button type="button" onClick={() => void retryAction.current?.()} className="rounded-xl bg-teal-700 px-5 py-3 font-semibold text-white">Try Again</button>
+            <button type="button" onClick={handleLogout} className="rounded-xl border border-gray-200 px-5 py-3 font-semibold text-gray-700">Return to Login</button>
           </div>
-        );
-      }
-      return (
-        <PatientDashboard
-          key={refreshKey}
-          user={currentUser}
-          resident={resident}
-          dashboard={dashboard}
-          onLogout={handleLogout}
-          onRefresh={handleRefresh}
-        />
-      );
-    }
-
-    if (currentUser.role === 'caretaker') {
-      return (
-        <CaretakerDashboard
-          key={refreshKey}
-          user={currentUser}
-          dashboard={dashboard}
-          onLogout={handleLogout}
-          onRefresh={handleRefresh}
-        />
-      );
-    }
-
-    if (currentUser.role === 'admin') {
-      return (
-        <AdminDashboard
-          key={refreshKey}
-          user={currentUser}
-          dashboard={dashboard}
-          onLogout={handleLogout}
-          onRefresh={handleRefresh}
-        />
-      );
-    }
+        </div>
+      </div>
+    );
   }
-
+  if (currentScreen === 'welcome') return <WelcomeScreen onContinue={() => showScreen('auth', 'push')} />;
+  if (currentScreen === 'auth') return <SignInSignUp onComplete={loadSession} />;
+  if (currentScreen === 'app' && currentUser) {
+    const props = { user: currentUser, dashboard, onLogout: handleLogout, onRefresh: handleRefresh };
+    const showDashboard = (content: ReactNode) => <>{refreshError && <div role="alert" className="fixed bottom-28 left-4 right-4 z-[70] rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900">{refreshError}<button type="button" className="ml-3 underline" onClick={()=>void refreshRecords()}>Retry refresh</button></div>}<Suspense fallback={<div role="status" className="p-8">Loading your workspace...</div>}>{content}</Suspense></>;
+    if (currentUser.role === 'admin') return showDashboard(<AdminDashboard key={currentUser.userId} {...props} />);
+    return (
+      <div className="care-access-denied min-h-screen flex items-center justify-center bg-gray-50 p-6">
+        <div className="max-w-md w-full rounded-2xl border border-red-200 bg-white p-8 text-center shadow-lg">
+          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-100 flex items-center justify-center text-red-600">
+            <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h1 className="text-xl font-bold text-gray-900">Admin Portal Only</h1>
+          <p className="mt-3 text-sm text-gray-600">
+            This web application is strictly for CareConnect Facility Administrators.
+            {currentUser.role === 'patient'
+              ? ' Patients must use the Elder/Orphan Mobile App to access medications, appointments, emotion AI, and meal plans.'
+              : ' Caretakers must use the Caretaker Mobile App.'}
+          </p>
+          <p className="mt-2 text-xs text-gray-500">
+            Per PDF specification, Prescription Reader, Facial Emotion AI, Vocal Analysis, and Meal Plans are restricted from the Admin Web Application.
+          </p>
+          <div className="mt-6 flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="w-full rounded-xl bg-teal-700 px-6 py-3 font-semibold text-white hover:bg-teal-800 transition-colors"
+            >
+              Sign Out & Switch to Admin Account
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
   return null;
 }

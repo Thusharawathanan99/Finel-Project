@@ -9,11 +9,11 @@
  *  - Weighted confidence voting & candidate merging
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { reconcileCandidates, parseRegimenTail } from './prescriptionSafety.js';
 
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // RxNorm Drug Database (top ~80 commonly prescribed)
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const DRUG_DATABASE = [
   { name: 'Lisinopril', aliases: ['zestril','prinivil'], drugClass: 'ACE Inhibitor' },
@@ -94,9 +94,9 @@ const DRUG_DATABASE = [
   { name: 'Valproic Acid', aliases: ['depakote','depakene'], drugClass: 'Anticonvulsant' },
 ];
 
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Prescription Abbreviations
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const PRESCRIPTION_ABBREVIATIONS = {
   'qd': 'once daily', 'od': 'once daily', 'bid': 'twice daily',
@@ -110,9 +110,9 @@ const PRESCRIPTION_ABBREVIATIONS = {
   'iv': 'intravenous', 'sc': 'subcutaneous', 'inh': 'inhaled', 'top': 'topically',
 };
 
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Levenshtein Distance & Fuzzy Matching
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function levenshtein(a, b) {
   const matrix = [];
@@ -147,49 +147,14 @@ function findDrugMatch(input, maxDistance = 3) {
   return null;
 }
 
-function normalizeDrugName(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
-}
-
-function isSameDrug(a, b) {
-  if (a === b) return true;
-  if (a.includes(b) || b.includes(a)) return true;
-  if (Math.max(a.length, b.length) <= 3) return a === b;
-  return levenshtein(a, b) <= 2;
-}
-
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Regex Medication Parser
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const MEDICATION_PATTERNS = [
-  /(?:^|\n)\s*(?:\d+[.)]\s*)?([A-Za-z][\w\s-]*?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s*(.*?)(?=\n|$)/gi,
-  /([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s+(?:PO|IM|IV|SC|INH|TOP|SL)?\s*(BID|TID|QID|QD|OD|PRN|HS|Q\d+H|QAM|QPM|QWK|once\s+daily|twice\s+daily|three\s+times\s+daily|four\s+times\s+daily|at\s+bedtime|as\s+needed|every\s+\d+\s+hours?)(?:\s|$)/gi,
-  /(?:Tab\.?|Cap\.?|Inj\.?|Syp\.?)\s+([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s*([\d-]+(?:\s*[-x]\s*[\d-]+)*(?:\s*(?:before|after|with)\s+(?:meals?|food|breakfast|lunch|dinner))?)/gi,
-  /(?:Rx:?\s*)?([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)(?:\s+(.*?))?(?=\n|$)/gi,
+  // Match one complete line. Horizontal whitespace prevents cross-line drug names.
+  /(?:^|\n)[ \t]*(?:\d+[.)][ \t]*)?(?:(?:Drug|Medication|Rx|Tab\.?|Cap\.?|Inj\.?|Syp\.?)[ \t]*:?[ \t]+)?([A-Za-z][\w \t'-]*?)[ \t]+(\d+(?:\.\d+)?|\.\d+)[ \t]*(mg|mcg|g|ml|units?|IU|mEq)[ \t]*([^\r\n]*)(?=\r?\n|$)/gi,
 ];
-
-function decodeDoseSchedule(schedule) {
-  const m = schedule.match(/^(\d)-(\d)-(\d)$/);
-  if (m) {
-    const parts = [];
-    if (m[1] !== '0') parts.push(`${m[1]} in the morning`);
-    if (m[2] !== '0') parts.push(`${m[2]} in the afternoon`);
-    if (m[3] !== '0') parts.push(`${m[3]} at night`);
-    return parts.join(', ') || 'as directed';
-  }
-  return schedule;
-}
-
-function normalizeFrequency(raw) {
-  let normalized = raw.trim();
-  if (/^\d-\d-\d$/.test(normalized)) return decodeDoseSchedule(normalized);
-  const words = normalized.split(/\s+/);
-  return words.map(w => {
-    const lower = w.toLowerCase().replace(/[.,;:]/g, '');
-    return PRESCRIPTION_ABBREVIATIONS[lower] || w;
-  }).join(' ') || 'as directed';
-}
 
 export function parseMedications(ocrText) {
   const results = [];
@@ -198,27 +163,73 @@ export function parseMedications(ocrText) {
     pattern.lastIndex = 0;
     let match;
     while ((match = pattern.exec(ocrText)) !== null) {
-      const rawDrugName = match[1].trim();
-      const dosageAmount = match[2];
+      const rawDrugName = match[1].trim().replace(/^(?:Tab|Cap|Inj|Syp|Rx)\.?\s+/i, '');
+      const dosageAmount = match[2].startsWith('.') ? `0${match[2]}` : match[2];
       const dosageUnit = match[3];
-      const rawFrequency = match[4] || '';
+      const drugOffset = match.index + match[0].indexOf(match[1]);
+      const rawLine = ocrText.slice(drugOffset).split(/\r?\n/, 1)[0].trim();
+      const strength = rawLine.match(/(?:\d+(?:\.\d+)?|\.\d+)\s*(?:mg|mcg|g|ml|units?|IU|mEq)\b/i);
+      const rawFrequency = strength ? rawLine.slice(strength.index + strength[0].length) : (match[4] || '');
       if (rawDrugName.length < 3) continue;
       const drugMatch = findDrugMatch(rawDrugName);
       const drugName = drugMatch ? drugMatch.drug.name : rawDrugName;
-      const confidence = drugMatch ? drugMatch.confidence : 0.3;
+      const confidence = drugMatch ? Math.min(0.8, drugMatch.confidence) : 0.3;
       const drugClass = drugMatch?.drug.drugClass;
-      const key = `${drugName.toLowerCase()}-${dosageAmount}${dosageUnit}`;
+      const regimenLine = rawFrequency.toLowerCase().replace(/\s+/g, ' ').trim();
+      const key = `${drugName.toLowerCase()}-${dosageAmount}${dosageUnit}-${regimenLine}`;
       if (seenDrugs.has(key)) continue;
       seenDrugs.add(key);
+      const { frequency, duration, instructions, needsReview: regimenNeedsReview } = parseRegimenTail(rawFrequency, PRESCRIPTION_ABBREVIATIONS);
+
       results.push({
-        drugName, dosage: `${dosageAmount}${dosageUnit}`,
-        frequency: normalizeFrequency(rawFrequency),
-        confidence, drugClass, rawMatch: match[0].trim(),
+        drugName,
+        dosage: `${dosageAmount}${dosageUnit}`,
+        frequency,
+        duration,
+        instructions,
+        confidence,
+        needsReview: regimenNeedsReview || confidence < 0.65 || !dosageAmount || frequency === 'Needs Review',
+        drugClass,
+        rawMatch: rawLine,
       });
     }
   }
   results.sort((a, b) => b.confidence - a.confidence);
   return results;
+}
+
+export function extractPrescriptionMetadata(text) {
+  let patientName = '';
+  let doctorName = '';
+  let date = '';
+
+  const patientMatch = text.match(/(?:patient(?:\s+name)?|pt(?:\s+name)?|name)\s*[:\-]\s*([A-Za-z\s\.\,\-\'\"]{2,40})/i);
+  if (patientMatch) {
+    const raw = patientMatch[1].split(/[\n\r,]/)[0].trim();
+    if (raw.length > 2 && !raw.toLowerCase().includes('rx') && !raw.toLowerCase().includes('dr')) {
+      patientName = raw;
+    }
+  }
+
+  const doctorMatch = text.match(/(?:dr\.?|doctor|physician|prescriber)\s*[:\-]?\s*([A-Za-z\s\.\,\-]{2,40})/i);
+  if (doctorMatch) {
+    let raw = doctorMatch[1].split(/[\n\r,]/)[0].trim();
+    if (!raw.toLowerCase().startsWith('dr') && !raw.toLowerCase().startsWith('doctor')) {
+      raw = `Dr. ${raw}`;
+    }
+    if (raw.length > 4) doctorName = raw;
+  }
+
+  const dateMatch = text.match(/(?:date|issued|rx\s*date)\s*[:\-]?\s*([0-9]{1,4}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{1,4})/i)
+    || text.match(/\b([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})\b/);
+  if (dateMatch) date = dateMatch[1].trim();
+  // An absent issue date is unknown, not today's date.
+
+  return {
+    patientName: patientName || 'Needs Review',
+    doctorName: doctorName || 'Needs Review',
+    date: date || 'Needs Review',
+  };
 }
 
 export function extractEntities(text) {
@@ -227,7 +238,7 @@ export function extractEntities(text) {
     const m = findDrugMatch(word, 2);
     if (m) drugs.push(m.drug.name);
   }
-  const dp = /\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|units?|IU|mEq)/gi;
+  const dp = /(?:\d+(?:\.\d+)?|\.\d+)\s*(?:mg|mcg|g|ml|units?|IU|mEq)/gi;
   let dm; while ((dm = dp.exec(text)) !== null) dosages.push(dm[0].trim());
   for (const [abbr, full] of Object.entries(PRESCRIPTION_ABBREVIATIONS)) {
     if (full.includes('daily') || full.includes('times') || full.includes('hours') || full.includes('bedtime') || full.includes('needed')) {
@@ -237,15 +248,15 @@ export function extractEntities(text) {
   return { drugs: [...new Set(drugs)], dosages: [...new Set(dosages)], frequencies: [...new Set(frequencies)] };
 }
 
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Gemini Multi-Model Retry
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const DEFAULT_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
+const DEFAULT_MODELS = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.5-flash'];
 const PERMANENTLY_UNAVAILABLE = new Set();
 
 function parseGeminiModels() {
-  const configured = process.env.VITE_GEMINI_MODELS;
+  const configured = process.env.GEMINI_MODELS;
   if (!configured) return DEFAULT_MODELS;
   const parsed = configured.split(',').map(m => m.trim()).filter(Boolean);
   return parsed.length > 0 ? parsed : DEFAULT_MODELS;
@@ -260,7 +271,7 @@ function isRetryableError(msg) {
 
 export async function callGeminiWithRetry(genAI, parts, options = {}) {
   const maxRetries = options.maxRetries ?? 2;
-  const timeoutMs = options.timeoutMs ?? 60000;
+  const timeoutMs = options.timeoutMs ?? 15000;
   const models = parseGeminiModels();
   let lastError = null;
 
@@ -271,23 +282,33 @@ export async function callGeminiWithRetry(genAI, parts, options = {}) {
     for (const modelName of active) {
       try {
         const model = genAI.getGenerativeModel({ model: modelName });
-        const resultPromise = model.generateContent(parts);
-        const result = await Promise.race([
-          resultPromise,
-          new Promise((_, reject) => setTimeout(() => reject(new Error(`Gemini timeout after ${timeoutMs}ms`)), timeoutMs))
-        ]);
-        console.log(`[Ensemble] ✅ Gemini model "${modelName}" succeeded`);
+        let timeout;
+        let result;
+        try {
+          result = await Promise.race([
+            model.generateContent(parts),
+            new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`Gemini timeout after ${timeoutMs}ms`)), timeoutMs); })
+          ]);
+        } finally {
+          clearTimeout(timeout);
+        }
+        console.log(`[Ensemble] âœ… Gemini model "${modelName}" succeeded`);
         return result;
       } catch (error) {
         lastError = error;
         const errMsg = error instanceof Error ? error.message : String(error);
         if (errMsg.includes('404')) {
           PERMANENTLY_UNAVAILABLE.add(modelName);
-          console.warn(`[Ensemble] Model "${modelName}" returned 404 — trying next...`);
+          console.warn(`[Ensemble] Model "${modelName}" returned 404 â€” trying next...`);
+          continue;
+        }
+        if (errMsg.includes('429') || errMsg.toLowerCase().includes('quota exceeded')) {
+          PERMANENTLY_UNAVAILABLE.add(modelName);
+          console.warn(`[Ensemble] Model "${modelName}" quota exceeded â€” marked unavailable, trying next...`);
           continue;
         }
         if (isRetryableError(errMsg)) {
-          console.warn(`[Ensemble] Model "${modelName}" overloaded — trying next...`);
+          console.warn(`[Ensemble] Model "${modelName}" overloaded â€” trying next...`);
           continue;
         }
         throw error;
@@ -295,7 +316,7 @@ export async function callGeminiWithRetry(genAI, parts, options = {}) {
     }
 
     if (attempt < maxRetries) {
-      const waitMs = Math.min(15000, 5000 * Math.pow(2, attempt)) + Math.floor(Math.random() * 500);
+      const waitMs = Math.min(6000, 2000 * Math.pow(2, attempt)) + Math.floor(Math.random() * 300);
       console.log(`[Ensemble] All models failed, retrying in ${waitMs}ms (attempt ${attempt+1}/${maxRetries})...`);
       await new Promise(r => setTimeout(r, waitMs));
     }
@@ -303,102 +324,66 @@ export async function callGeminiWithRetry(genAI, parts, options = {}) {
   throw lastError || new Error('All Gemini models failed');
 }
 
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Weighted Voting & Candidate Merging
-// ─────────────────────────────────────────────
-
-const MODEL_WEIGHTS = { donut: 0.40, regex: 0.25, gemini: 0.35 };
-const AGREEMENT_BONUS = { 3: 1.30, 2: 1.15, 1: 1.00 };
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function mergeCandidates(candidates) {
-  const groups = new Map();
-  for (const c of candidates) {
-    const norm = normalizeDrugName(c.drugName);
-    let matched = false;
-    for (const [key, group] of groups) {
-      if (isSameDrug(norm, key)) { group.push({ ...c, normalizedName: norm }); matched = true; break; }
-    }
-    if (!matched) groups.set(norm, [{ ...c, normalizedName: norm }]);
-  }
-
-  const results = [];
-  for (const group of groups.values()) {
-    const sources = [...new Set(group.map(c => c.source))];
-    const best = pickBestCandidate(group);
-    let weightedConf = 0, totalWeight = 0;
-    const sourceDetails = {};
-    for (const c of group) {
-      const w = MODEL_WEIGHTS[c.source] || 0.25;
-      weightedConf += c.confidence * w;
-      totalWeight += w;
-      sourceDetails[c.source] = { confidence: c.confidence };
-    }
-    const baseConf = totalWeight > 0 ? weightedConf / totalWeight : 0;
-    const bonus = AGREEMENT_BONUS[Math.min(sources.length, 3)] || 1;
-    const finalConf = Math.min(0.99, baseConf * bonus);
-
-    if (finalConf < 0.10) continue;
-    if (finalConf < 0.20 && sources.length === 1 && sources[0] === 'donut') continue;
-
-    results.push({
-      drugName: best.drugName, dosage: best.dosage, frequency: best.frequency,
-      confidence: finalConf, sources, sourceDetails,
-    });
-  }
-  results.sort((a, b) => b.confidence - a.confidence);
-  return results;
+  return reconcileCandidates(candidates, name => {
+    const match = findDrugMatch(name);
+    return match && match.confidence > 0.8 ? match.drug.name : name;
+  });
 }
 
-function pickBestCandidate(group) {
-  for (const c of group) {
-    const m = findDrugMatch(c.drugName);
-    if (m && m.confidence > 0.8) return { ...c, drugName: m.drug.name };
-  }
-  const priority = ['gemini', 'donut', 'regex'];
-  for (const src of priority) {
-    const c = group.find(g => g.source === src);
-    if (c) return c;
-  }
-  return group.sort((a, b) => b.confidence - a.confidence)[0];
-}
-
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Full Gemini Prompt (matches web app)
-// ─────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-export const GEMINI_PROMPT = `You are a clinical pharmacist AI assistant. Analyze the following prescription and return a JSON object with the extracted medications.
+export const GEMINI_PROMPT = `You are an expert clinical pharmacist AI. Analyze the following prescription and extract all structured data accurately.
 
 CRITICAL RULES:
 - Extract EVERY medication/drug name you see, even if you do not recognize it.
 - Include brand names, generic names, and local/regional drug names.
-- NEVER use the word "Missing", "N/A", "Unknown", or "Not specified" as values. Use an empty string "" instead.
-- If dosage or frequency is not written on the prescription, use "" (empty string).
-- Items prefixed with "G." or "Rx" are medications — always include them.
+- If any text cannot be recognized confidently, output "Needs Review" instead of guessing or returning incorrect information.
+- Items prefixed with "G." or "Rx" are medications â€” always include them.
 
-INSTRUCTIONS:
-1. If an image is provided, read ALL text from the prescription image first
-2. Identify EVERY medication mentioned — do NOT skip any, even if unfamiliar
-3. For each medication, extract: drugName, dosage, frequency, route
-4. Correct any obvious OCR errors in drug names (e.g., "Llsinopril" → "Lisinopril")
-5. Expand any abbreviations (BID → twice daily, QD → once daily, PO → by mouth)
-6. If dosage/frequency is not present on the prescription, use empty string ""
-7. Flag any potential drug interactions as warnings
-8. Rate your confidence 0-1 for each medication
-9. Include the raw text you extracted from the image in "rawText"
+EXTRACTION INSTRUCTIONS:
+1. Extract ALL prescription header info:
+   - "patientName": Name of patient (e.g. "John Doe"). If illegible or absent, output "Needs Review".
+   - "doctorName": Name of prescribing doctor with title (e.g. "Dr. Sarah Connor"). If illegible or absent, output "Needs Review".
+   - "date": Date of issue (e.g. "2026-10-04"). If illegible or absent, output "Needs Review".
+2. Extract EVERY medication listed:
+   - "drugName": Full brand or generic drug name.
+   - "dosage": Strength/amount (e.g. "500mg", "10ml", "1 tablet"). If illegible or absent, output "Needs Review".
+   - "frequency": How often to take (e.g. "Once daily", "Twice daily after meals", "Every 8 hours"). Expand clinical abbreviations (BID -> Twice daily, TID -> Three times daily, QD -> Once daily, PRN -> As needed). If illegible or absent, output "Needs Review".
+   - "duration": How long to take (e.g. "7 days", "14 days", "1 month", "Ongoing"). If absent, output "As directed".
+   - "instructions": Specific instructions (e.g. "Take after food with full glass of water", "Apply topically"). If absent, output "Follow doctor guidance".
+   - "route": e.g. "oral", "topical", "inhalation".
+   - "confidence": Float between 0.0 and 1.0 representing your confidence in this extraction.
+   - "needsReview": true if confidence < 0.70 or if any critical field (drugName, dosage, frequency) is uncertain or marked "Needs Review"; false otherwise.
+   - "warnings": Potential interactions, allergies, or precautions.
+3. Correct obvious handwriting/OCR typos (e.g. "Llsinopril" -> "Lisinopril") and list corrections in "corrections".
+4. In "rawText", include the complete raw text read from the prescription.
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON matching this exact structure:
 {
-  "rawText": "Full text extracted from the prescription image",
+  "rawText": "Full text read from the prescription",
+  "patientName": "John Doe",
+  "doctorName": "Dr. Sarah Connor",
+  "date": "2026-10-04",
   "medications": [
     {
-      "drugName": "Lisinopril",
-      "dosage": "10mg",
-      "frequency": "once daily",
-      "route": "by mouth",
+      "drugName": "Amoxicillin",
+      "dosage": "500mg",
+      "frequency": "Three times daily after meals",
+      "duration": "7 days",
+      "instructions": "Take with full glass of water",
+      "route": "oral",
       "confidence": 0.95,
+      "needsReview": false,
       "warnings": []
     }
   ],
-  "corrections": ["Corrected 'Llsinopril' to 'Lisinopril'"],
-  "overallConfidence": 0.9
+  "corrections": [],
+  "overallConfidence": 0.95
 }`;

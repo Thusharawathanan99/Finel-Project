@@ -5,6 +5,7 @@
  */
 
 import { Medication } from '../../models/Medication';
+import { parseRegimenTail } from '../../../../../4-system-engine/api/routes/prescriptionSafety.js';
 import { findDrugMatch, expandAbbreviation, PRESCRIPTION_ABBREVIATIONS } from './rxnormDictionary';
 
 export interface ParsedMedication {
@@ -19,60 +20,11 @@ export interface ParsedMedication {
  * Each handles different ways doctors write prescriptions.
  */
 const MEDICATION_PATTERNS = [
-  // "1. Lisinopril 10mg once daily"
-  /(?:^|\n)\s*(?:\d+[.)]\s*)?([A-Za-z][\w\s-]*?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s*(.*?)(?=\n|$)/gi,
-  
-  // "Lisinopril 10 mg PO QD"
-  /([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s+(?:PO|IM|IV|SC|INH|TOP|SL)?\s*(BID|TID|QID|QD|OD|PRN|HS|Q\d+H|QAM|QPM|QWK|once\s+daily|twice\s+daily|three\s+times\s+daily|four\s+times\s+daily|at\s+bedtime|as\s+needed|every\s+\d+\s+hours?)(?:\s|$)/gi,
-  
-  // "Tab. Metformin 500mg 1-0-1" (South Asian format)
-  /(?:Tab\.?|Cap\.?|Inj\.?|Syp\.?)\s+([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s*([\d-]+(?:\s*[-x]\s*[\d-]+)*(?:\s*(?:before|after|with)\s+(?:meals?|food|breakfast|lunch|dinner))?)/gi,
-  
-  // "Rx: Atorvastatin 20mg"
-  /(?:Rx:?\s*)?([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)(?:\s+(.*?))?(?=\n|$)/gi,
+  // Match one complete line. Horizontal whitespace prevents cross-line drug names.
+  /(?:^|\n)[ \t]*(?:\d+[.)][ \t]*)?(?:(?:Drug|Medication|Rx|Tab\.?|Cap\.?|Inj\.?|Syp\.?)[ \t]*:?[ \t]+)?([A-Za-z][\w \t'-]*?)[ \t]+(\d+(?:\.\d+)?|\.\d+)[ \t]*(mg|mcg|g|ml|units?|IU|mEq)[ \t]*([^\r\n]*)(?=\r?\n|$)/gi,
 ];
 
-/**
- * South Asian dosing format decoder (e.g., "1-0-1" means morning-afternoon-night).
- */
-function decodeDoseSchedule(schedule: string): string {
-  const match = schedule.match(/^(\d)-(\d)-(\d)$/);
-  if (match) {
-    const [, morning, afternoon, night] = match;
-    const parts: string[] = [];
-    if (morning !== '0') parts.push(`${morning} in the morning`);
-    if (afternoon !== '0') parts.push(`${afternoon} in the afternoon`);
-    if (night !== '0') parts.push(`${night} at night`);
-    return parts.join(', ') || 'as directed';
-  }
-  return schedule;
-}
-
-/**
- * Clean and normalize a frequency string by expanding abbreviations.
- */
-function normalizeFrequency(raw: string): string {
-  let normalized = raw.trim();
-  
-  // First try to decode South Asian format
-  if (/^\d-\d-\d$/.test(normalized)) {
-    return decodeDoseSchedule(normalized);
-  }
-  
-  // Expand known abbreviations
-  const words = normalized.split(/\s+/);
-  const expanded = words.map(word => {
-    const lower = word.toLowerCase().replace(/[.,;:]/g, '');
-    return PRESCRIPTION_ABBREVIATIONS[lower] || word;
-  });
-  
-  return expanded.join(' ') || 'as directed';
-}
-
-/**
- * Parse raw OCR text into structured medication entries.
- * Tries all patterns and deduplicates results.
- */
+/** Parse each detected line once, retaining different dose schedules. */
 export function parseMedications(ocrText: string): ParsedMedication[] {
   const results: ParsedMedication[] = [];
   const seenDrugs = new Set<string>();
@@ -83,10 +35,13 @@ export function parseMedications(ocrText: string): ParsedMedication[] {
     let match: RegExpExecArray | null;
 
     while ((match = pattern.exec(ocrText)) !== null) {
-      const rawDrugName = match[1].trim();
-      const dosageAmount = match[2];
+      const rawDrugName = match[1].trim().replace(/^(?:Tab|Cap|Inj|Syp|Rx)\.?\s+/i, '');
+      const dosageAmount = match[2].startsWith('.') ? `0${match[2]}` : match[2];
       const dosageUnit = match[3];
-      const rawFrequency = match[4] || '';
+      const drugOffset = match.index + match[0].indexOf(match[1]);
+      const rawLine = ocrText.slice(drugOffset).split(/\r?\n/, 1)[0].trim();
+      const strength = rawLine.match(/(?:\d+(?:\.\d+)?|\.\d+)\s*(?:mg|mcg|g|ml|units?|IU|mEq)\b/i);
+      const rawFrequency = strength ? rawLine.slice(strength.index! + strength[0].length) : (match[4] || '');
 
       // Skip overly short matches or noise
       if (rawDrugName.length < 3) continue;
@@ -94,22 +49,34 @@ export function parseMedications(ocrText: string): ParsedMedication[] {
       // Fuzzy match against RxNorm dictionary
       const drugMatch = findDrugMatch(rawDrugName);
       const drugName = drugMatch ? drugMatch.drug.name : rawDrugName;
-      const confidence = drugMatch ? drugMatch.confidence : 0.3;
+      const confidence = drugMatch ? Math.min(0.8, drugMatch.confidence) : 0.3;
       const drugClass = drugMatch?.drug.drugClass;
 
       // Deduplicate
-      const key = `${drugName.toLowerCase()}-${dosageAmount}${dosageUnit}`;
+      const regimenLine = rawFrequency.toLowerCase().replace(/\s+/g, ' ').trim();
+      const key = `${drugName.toLowerCase()}-${dosageAmount}${dosageUnit}-${regimenLine}`;
       if (seenDrugs.has(key)) continue;
       seenDrugs.add(key);
 
+      // Extract duration if present (e.g. "for 7 days", "x 5 days", "10 days")
+      const { frequency, duration, instructions, needsReview: regimenNeedsReview } = parseRegimenTail(rawFrequency, PRESCRIPTION_ABBREVIATIONS);
       const dosage = `${dosageAmount}${dosageUnit}`;
-      const frequency = normalizeFrequency(rawFrequency);
+      const needsReview = regimenNeedsReview || confidence < 0.65 || !dosageAmount || frequency === 'Needs Review';
 
       results.push({
-        medication: new Medication(drugName, dosage, frequency),
+        medication: new Medication(
+          drugName,
+          dosage,
+          frequency,
+          undefined,
+          duration,
+          instructions,
+          confidence,
+          needsReview
+        ),
         confidence,
         matchedDrugClass: drugClass,
-        rawMatch: match[0].trim(),
+        rawMatch: rawLine,
       });
     }
   }
@@ -118,6 +85,55 @@ export function parseMedications(ocrText: string): ParsedMedication[] {
   results.sort((a, b) => b.confidence - a.confidence);
 
   return results;
+}
+
+/**
+ * Extract prescription metadata: Patient Name, Doctor Name, Date.
+ */
+export function extractPrescriptionMetadata(text: string): {
+  patientName: string;
+  doctorName: string;
+  date: string;
+} {
+  let patientName = '';
+  let doctorName = '';
+  let date = '';
+
+  // Patient Name patterns
+  const patientMatch = text.match(/(?:patient(?:\s+name)?|pt(?:\s+name)?|name)\s*[:\-]\s*([A-Za-z\s\.\,\-\'\"]{2,40})/i);
+  if (patientMatch) {
+    const raw = patientMatch[1].split(/[\n\r,]/)[0].trim();
+    if (raw.length > 2 && !raw.toLowerCase().includes('rx') && !raw.toLowerCase().includes('dr')) {
+      patientName = raw;
+    }
+  }
+
+  // Doctor Name patterns
+  const doctorMatch = text.match(/(?:dr\.?|doctor|physician|prescriber)\s*[:\-]?\s*([A-Za-z\s\.\,\-]{2,40})/i);
+  if (doctorMatch) {
+    let raw = doctorMatch[1].split(/[\n\r,]/)[0].trim();
+    if (!raw.toLowerCase().startsWith('dr') && !raw.toLowerCase().startsWith('doctor')) {
+      raw = `Dr. ${raw}`;
+    }
+    if (raw.length > 4) {
+      doctorName = raw;
+    }
+  }
+
+  // Date patterns
+  const dateMatch = text.match(/(?:date|issued|rx\s*date)\s*[:\-]?\s*([0-9]{1,4}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{1,4})/i)
+    || text.match(/\b([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})\b/);
+  if (dateMatch) {
+    date = dateMatch[1].trim();
+  } else {
+    // Missing issue dates must remain unknown.
+  }
+
+  return {
+    patientName: patientName || 'Needs Review',
+    doctorName: doctorName || 'Needs Review',
+    date: date || 'Needs Review',
+  };
 }
 
 /**
@@ -144,7 +160,7 @@ export function extractEntities(text: string): {
   }
 
   // Extract dosages
-  const dosagePattern = /\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|units?|IU|mEq)/gi;
+  const dosagePattern = /(?:\d+(?:\.\d+)?|\.\d+)\s*(?:mg|mcg|g|ml|units?|IU|mEq)/gi;
   let dosageMatch: RegExpExecArray | null;
   while ((dosageMatch = dosagePattern.exec(text)) !== null) {
     dosages.push(dosageMatch[0].trim());

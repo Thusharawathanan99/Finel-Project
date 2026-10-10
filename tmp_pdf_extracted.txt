@@ -1,0 +1,539 @@
+=== PAGE 1 ===
+CareConnect System
+Complete Features Analysis — All Functions Listed One by One
+Project: ML-Based Prescription Reader & Elder/Orphan Care Management System
+Architecture: 2 Mobile Apps (Caretaker + Elder/Orphan) & 1 Admin Web App + ML Web Backend
+Tech Stack: React/Vite Frontend · Node.js/Express API · Python/FastAPI ML Server · MySQL · Firebase Auth · Docker
+Document Type: Exhaustive feature-by-feature specification extracted from source code analysis
+YOUR 5 KEY PROJECT REQUIREMENTS (Verified Against Codebase)
+1. Admin can add or remove elders/orphans and caretaker forms ■
+2. Admins can assign caretakers to the elders ■
+3. Admin does NOT have access to prescription reader and facial recognition ■
+4. Admin can allow or deny the leave of caretakers and assign temporary caretakers ■
+5. Dashboard shows total elders & caretakers on/off summary — not one by one ■
+Role-Based Access Summary
+Feature
+Admin Web App
+Caretaker App
+Elder/Orphan App
+Add/Remove Elders &
+Caretakers
+■ Full Access
+■ No Access
+■ No Access
+Assign Caretakers to Elders
+■ Full Access
+■ No Access
+■ No Access
+Prescription Reader (ML/OCR)
+■ NO ACCESS
+■ Full Access
+■ Full Access
+Facial Recognition / Emotion
+AI
+■ NO ACCESS
+View Alerts Only
+■ Full Access (Webcam +
+Audio)
+Leave Management
+■ Approve / Deny / Assign
+Temp
+■ Submit Requests
+■ No Access
+Dashboard Style
+Aggregate Summary (totals,
+not one-by-one)
+Assigned Elder Roster
+Personal Care Dashboard
+Confidential — CareConnect System Analysis Document
+Page 1 of 9
+
+
+=== PAGE 2 ===
+APP 1 — ADMIN WEB APPLICATION
+Web-based dashboard for facility administrators to manage elders, caretakers, leave, and system monitoring
+Authentication & Login
+ 1.
+Admin can log in using Firebase Authentication with email and password credentials.
+ 2.
+System verifies the user role as 'admin' from the database before granting admin dashboard access.
+ 3.
+Admin can securely log out from the system, ending the authenticated session.
+Dashboard Overview (Summary View — Not One by One)
+ 4.
+Dashboard displays the total number of elders/orphans (residents) as a single aggregate summary card.
+ 5.
+Dashboard displays the total number of caretakers as a single aggregate summary card.
+ 6.
+Dashboard displays the average wellness score calculated across all elders' emotional states.
+ 7.
+Dashboard displays the total count of critical alerts requiring administrative attention.
+ 8.
+Dashboard shows a pending leave requests notification badge with count, linking to the Leave review page.
+ 9.
+Dashboard displays a system components health summary showing online/offline/maintenance status.
+ 10.
+Dashboard provides Quick Action buttons: Add Resident, Add Caretaker, Manage Residents, and System Status.
+Elder / Orphan (Resident) Form Management
+ 11.
+Admin can add a new elder/orphan using a form with fields: Full Name, Age, Room Number, Floor Number.
+ 12.
+The add resident form also captures: Address, City, State, ZIP Code.
+ 13.
+The add resident form also captures: Emergency Contact Name, Emergency Contact Phone, Emergency Contact Relation.
+ 14.
+Admin can view all registered elders/orphans in a list showing name, age, room number, medication count, prescription
+count, and wellness score.
+ 15.
+Admin can remove/delete an elder/orphan from the system with a confirmation dialog.
+Caretaker Form Management
+ 16.
+Admin can add a new caretaker using a form with fields: Full Name, Email, Temporary Password (min 6 chars), Phone,
+Specialization.
+ 17.
+Adding a caretaker creates a real Firebase Authentication login account so the caretaker can sign in to their app.
+ 18.
+Admin can view all registered caretakers in a list showing name, specialization, email, phone, assigned resident count, and
+active/inactive status.
+ 19.
+Admin can remove/delete a caretaker from the system with a confirmation dialog.
+Caretaker-to-Elder Assignment
+ 20.
+Admin can assign a caretaker to one or more elders/orphans via the caretaker-resident assignment API.
+ 21.
+Admin can view how many residents are assigned to each caretaker on the caretaker list view.
+ 22.
+Admin can reassign or unassign caretakers from elders when care requirements change.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 2 of 9
+
+
+=== PAGE 3 ===
+Caretaker Leave Management (Approve / Deny / Temp Replacement)
+ 23.
+Admin can view all pending leave requests submitted by caretakers, showing caretaker name, start date, end date,
+number of days, and reason.
+ 24.
+Admin can review a leave request by clicking the 'Review Request' button to expand detailed options.
+ 25.
+Admin can assign a temporary replacement caretaker from a dropdown list of active caretakers (filtered to exclude the
+requesting caretaker).
+ 26.
+Admin can approve a leave request — the system records the reviewer's name, approval timestamp, and temporary
+replacement caretaker.
+ 27.
+Admin can reject/deny a leave request — the system records the reviewer's name and rejection timestamp.
+ 28.
+Leave approval/rejection is persisted to MySQL database via the API with full audit trail.
+Emergency Alert Management
+ 29.
+Admin receives real-time emergency alert banners with animated pulse indicators when a caretaker triggers a panic alert.
+ 30.
+Admin can view emergency alert details: message, caretaker name who triggered it, location, and timestamp.
+ 31.
+Admin can acknowledge emergency alerts with their administrative sign-off, marking them as handled.
+ML System Component Monitoring
+ 32.
+Admin can view all ML system components (OCR Engine, NLP Engine, Emotion AI) with their name, version, description,
+and current status.
+ 33.
+Admin can toggle system component status between Online → Offline → Maintenance by tapping the status button.
+ 34.
+Admin can add a new system component with fields: System Name, Version, Description, and initial Status.
+ 35.
+Admin can remove/delete a system component from the registry with a confirmation dialog.
+Access Restrictions (Admin Does NOT Have)
+ 36.
+Admin does NOT have access to the ML-based Prescription Reader (upload, scan, OCR, NLP extraction). This feature is
+only available in the Caretaker App and Elder App.
+ 37.
+Admin does NOT have access to the Facial Recognition / Emotion Detection webcam feature. This feature is only available
+in the Elder/Orphan App.
+ 38.
+Admin does NOT have access to the Vocal Tone audio analysis feature. This feature is only available in the Elder/Orphan
+App.
+ 39.
+Admin does NOT have access to the AI Meal Plan generator. This feature is only available in the Caretaker App and Elder
+App.
+Admin Navigation Tabs
+ 40.
+Bottom navigation bar with 5 tabs: Overview, Residents, Caretakers, Leave, Systems.
+ 41.
+Leave tab shows a notification badge with the count of pending leave requests.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 3 of 9
+
+
+=== PAGE 4 ===
+APP 2 — CARETAKER MOBILE APPLICATION
+Mobile-first app for caretakers to manage assigned elders, prescriptions, medications, appointments, meal plans, and leave
+Authentication & Login
+ 42.
+Caretaker can sign in with email and password using Firebase Authentication.
+ 43.
+System identifies the user role as 'caretaker' and loads the Caretaker Dashboard.
+ 44.
+Caretaker can securely log out from the app.
+Dashboard Home (Summary View)
+ 45.
+Dashboard shows how many elders are under this caretaker's control — total assigned residents count.
+ 46.
+Dashboard shows the number of active alerts for assigned elders.
+ 47.
+Dashboard shows the average wellness score calculated across all assigned elders.
+ 48.
+Dashboard shows the number of upcoming appointments for assigned elders.
+ 49.
+Dashboard provides Quick Action buttons: View Residents, Request Leave, Check Alerts, Emergency Panic Button.
+ 50.
+Dashboard displays a Recent Residents preview showing the first 3 assigned elders with their name, room number, and
+wellness score badge.
+Assigned Elders / Residents Roster
+ 51.
+Caretaker can view a list of all elders assigned to them showing: elder name, age, room number, wellness score,
+medication count, and prescription count.
+ 52.
+Caretaker can tap on any elder to open their detailed profile view.
+ 53.
+Detail view shows elder's name, age, room number, medication count, prescription count, and latest wellness score.
+Prescription Reader (ML-Based — Full Access)
+ 54.
+Caretaker can upload a prescription image for a selected elder via file picker or camera capture.
+ 55.
+System runs ML-based OCR (CRNN/TrOCR) to extract text from the prescription image.
+ 56.
+System runs the Donut transformer model (if available) in parallel with OCR for structured prescription parsing.
+ 57.
+System applies NLP entity extraction to identify doctor name, drug names, dosages, and frequencies from extracted text.
+ 58.
+An Ensemble Orchestrator compares OCR+NLP and Donut confidence scores to select the best result.
+ 59.
+Caretaker can review all extracted medication details (drug name, dosage, frequency) before saving.
+ 60.
+Caretaker can edit, add, or delete medication rows to correct extraction errors before final submission.
+ 61.
+Caretaker can enter doctor name and associate it with the prescription.
+ 62.
+Prescription and medications are saved to the MySQL database and linked to the elder's profile.
+ 63.
+If the image is unreadable, a manual entry fallback allows the caretaker to type medication details directly.
+Medication Management
+ 64.
+Caretaker can view all current active medications for a selected elder showing drug name, dosage, and frequency.
+ 65.
+Caretaker can mark a medication as finished/completed using the 'Finish Medication' button, which moves it to the history
+log.
+ 66.
+Caretaker can view finished medication history for a selected elder showing drug name, dosage, frequency, and finished
+date/time.
+ 67.
+Medications tab has 3 sub-tabs: Current Meds, History (Finished), and Diet Plan.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 4 of 9
+
+
+=== PAGE 5 ===
+Appointment Booking & Management
+ 68.
+Caretaker can book a new appointment for a selected elder with fields: Doctor Name, Specialization, Date, Time, Reason.
+ 69.
+Caretaker can view upcoming appointments for assigned elders on the dashboard.
+AI Meal Plan (Diet Plan View)
+ 70.
+Caretaker can view an AI-generated 7-day meal plan for a selected elder, designed around their active medications and
+allergies.
+ 71.
+Caretaker can trigger regeneration of the meal plan when prescriptions or dietary conditions change.
+ 72.
+Meal plan shows breakfast, lunch, dinner, snacks, and hydration targets for each day.
+Emotional Wellness Monitoring (View Only)
+ 73.
+Caretaker can view the emotional wellness history of a selected elder showing the last 5 wellness scores with
+timestamps.
+ 74.
+Wellness scores are colour-coded: green (≥70 — good), yellow (50-69 — moderate), orange (<50 — concern).
+ 75.
+Caretaker receives critical alerts when an assigned elder's emotional wellness score drops to concerning levels.
+Leave Request Submission
+ 76.
+Caretaker can submit a leave request with fields: Start Date, End Date, and Reason for absence.
+ 77.
+System auto-calculates the number of leave days from the date range.
+ 78.
+System validates that start date is not in the past and end date is not before start date.
+ 79.
+Caretaker can view all their submitted leave requests with status badges: PENDING (yellow), APPROVED (green),
+REJECTED (red).
+ 80.
+For approved requests, the caretaker can see the assigned temporary replacement caretaker's name.
+ 81.
+Leave request is persisted to MySQL database via the API.
+Emergency Panic Alert
+ 82.
+Caretaker has a prominent Emergency panic button on the home dashboard.
+ 83.
+Clicking the Emergency button shows a confirmation dialog warning that it will alert the administrator.
+ 84.
+Upon confirmation, the system instantly broadcasts an emergency alert to the admin with the caretaker's name, location,
+and timestamp.
+Alerts View
+ 85.
+Caretaker can view emergency alerts with full details: message, sender name, and timestamp.
+ 86.
+Caretaker can view regular care alerts with severity levels: Critical (red), High (orange), Medium (yellow), Low (blue).
+ 87.
+Alert badge on the bottom navigation shows the count of active unacknowledged alerts.
+Caretaker Navigation Tabs
+ 88.
+Bottom navigation bar with 4 tabs: Home, Residents, Leave, Alerts.
+ 89.
+Alerts tab shows a red notification badge with the count of active alerts.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 5 of 9
+
+
+=== PAGE 6 ===
+APP 3 — ELDER / ORPHAN (PATIENT) MOBILE APPLICATION
+Accessible patient-facing mobile app for elders and orphans to view care info, track emotions, manage medications, and view meal
+plans
+Authentication & Login
+ 90.
+Elder/orphan can sign up with name, email, password, and select their assigned caretaker from a dropdown.
+ 91.
+Elder/orphan can sign in with email and password using Firebase Authentication.
+ 92.
+System identifies the user role as 'patient' and loads the personalized Patient Dashboard.
+ 93.
+Elder/orphan can securely log out from the app.
+Home Dashboard
+ 94.
+Dashboard shows a personalized greeting with the elder's first name and a 'Your Wellness Matters' message.
+ 95.
+Dashboard has 6 quick-action tiles: My Medicines, How I Feel (Emotions), Appointments, Upload Rx (Prescription), My Diet
+& Meal Plan.
+ 96.
+Dashboard displays the room and floor information card showing the elder's assigned room number and floor.
+ 97.
+Dashboard shows Today's Summary with: medications taken count, current emotional wellness level, and next appointment
+date.
+ 98.
+Dashboard shows a 7-day wellness trend line chart (Recharts) visualizing emotional score history over the past week.
+Medication View
+ 99.
+Elder can view all current active medications with drug name, dosage, and frequency for each medicine.
+ 100.
+Each medication card has 3 action buttons: Taken, Skip, and Remind for self-tracking.
+ 101.
+Elder can see a countdown timer showing the time until the next medication dose.
+ 102.
+Elder can upload a new prescription directly from the medications page.
+Prescription Upload (ML-Based — Full Access)
+ 103.
+Elder can upload a prescription image via file picker or camera capture.
+ 104.
+System processes the image through the same ML pipeline (OCR + Donut + NLP + Ensemble) as the Caretaker App.
+ 105.
+Elder can review and edit extracted medications before saving to the database.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 6 of 9
+
+
+=== PAGE 7 ===
+Facial Recognition & Emotion AI (Full Access — Webcam + Audio)
+ 106.
+Elder can open the Emotion Logger modal with a full-screen webcam interface.
+ 107.
+System activates the device camera and runs TensorFlow.js face-api.js models in the browser.
+ 108.
+System uses TinyFaceDetector for real-time facial bounding box detection from the live webcam stream.
+ 109.
+System uses FaceExpressionNet to classify facial expressions into 7 emotions: Happy, Sad, Angry, Fearful, Disgusted,
+Surprised, Neutral.
+ 110.
+System shows live real-time emotion detection results updating continuously while the camera is active.
+ 111.
+System calculates a wellness score (0-100) based on weighted probabilities of detected emotions (Happy=95, Neutral=60,
+Angry=10, etc.).
+ 112.
+Elder can capture/freeze a frame to lock in their detected emotional state.
+ 113.
+Elder can perform vocal tone recording using the Web Audio API for acoustic feature analysis.
+ 114.
+System analyzes pitch autocorrelation, jitter, shimmer, spectral energy, and RMS volume from the audio waveform.
+ 115.
+System calculates a vocal stability and distress score from the captured audio to complement facial data.
+ 116.
+System combines facial expression + vocal tone into a unified multimodal wellness assessment.
+ 117.
+Elder can tag a specific medication they think is related to how they feel (optional association).
+ 118.
+Elder can add a text note describing how they feel in their own words.
+ 119.
+Emotion record is saved to MySQL database with timestamp, wellness score, emotion label, category, related medicine,
+and note.
+ 120.
+Emotion data is pushed to Firestore for real-time updates to the caretaker and admin dashboards.
+Emotional Wellness Tracking
+ 121.
+Elder can view their current emotional state score as a large display with emotional level label.
+ 122.
+Elder can view a weekly emotional wellness trend chart plotting scores over 7 data points.
+ 123.
+Elder can tap 'Log How I Feel Now' button to launch the emotion logger at any time.
+Appointment Management
+ 124.
+Elder can view upcoming scheduled appointments with doctor name, specialization, date, time, and reason.
+ 125.
+Elder can book a new appointment with fields: Doctor Name, Specialization, Date, Time, Reason.
+ 126.
+Elder can reschedule or cancel an existing appointment.
+AI Diet & Meal Plan
+ 127.
+Elder can view their personalized 7-day AI-generated meal plan based on active medications, allergies, and medical
+history.
+ 128.
+Meal plan shows breakfast, lunch, dinner, healthy snacks, and hydration goals for each day.
+ 129.
+Meal plan includes drug-food interaction warnings and safety notes for specific medication-food combinations.
+Personal Profile Management
+ 130.
+Elder can view their basic information: name, age, resident ID, and date of birth.
+ 131.
+Elder can view their address details: street address, city, state, and ZIP code.
+ 132.
+Elder can view their emergency contact details: contact name, phone number, and relation.
+ 133.
+Elder can edit their address and emergency contact information by tapping the 'Edit Info' button.
+ 134.
+Elder can save updated profile information back to the system.
+Elder Navigation Tabs
+ 135.
+Bottom navigation bar with 6 tabs: Home, Meds, Appts, Feel (Emotions), Meals, Profile.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 7 of 9
+
+
+=== PAGE 8 ===
+ML WEB SYSTEM — BACKEND SERVICES & AI ENGINES
+Python FastAPI ML server, Node.js API server, MySQL database, Firebase Auth, and Docker microservices architecture
+ML Prescription Reader Engine (Python FastAPI Server)
+ 136.
+Server hosts a Donut (Document Understanding Transformer) model fine-tuned on medical prescriptions for structured
+parsing.
+ 137.
+Server supports image preprocessing: contrast normalization, adaptive thresholding, skew correction, and contour noise
+removal.
+ 138.
+Server exposes /predict endpoint that accepts a prescription image and returns extracted structured JSON (doctor, drugs,
+dosages, frequencies).
+ 139.
+Server exposes /health endpoint for Docker health checks and system monitoring.
+ 140.
+Server uses CRNN / TrOCR hybrid OCR pipeline for handwritten and printed medical text recognition.
+ 141.
+Server has ONNX model export capability for optimized inference on edge devices.
+Client-Side ML Engines (Browser-Based)
+ 142.
+Browser runs a CRNN OCR engine (client-side) as a fallback when the Python server is unavailable.
+ 143.
+Browser runs an NLP entity extraction engine with medical tokenizer and regex parsers to extract drug name, dosage, and
+frequency.
+ 144.
+Browser runs an Ensemble Orchestrator that compares Donut (server) and OCR+NLP (client) results, selecting the
+highest-confidence output.
+ 145.
+Browser runs a Model Accuracy Tracker that records confidence scores, latency, and result distributions for each ML
+model.
+ 146.
+Browser runs the FacialEmotionEngine using TensorFlow.js and face-api.js for real-time facial expression detection.
+ 147.
+Browser runs the VocalToneEngine using Web Audio API for real-time acoustic feature extraction and emotional analysis.
+AI Meal Plan Engine
+ 148.
+System generates 7-day balanced meal plans using resident age, medical history, medications, allergies, and dietary
+restrictions.
+ 149.
+System identifies drug-food contraindications (e.g., Warfarin vs. Vitamin K foods, Metformin vs. high glycemic foods).
+ 150.
+System cross-checks meals against allergy lists to prevent allergic reactions.
+ 151.
+System caches generated meal plans in MySQL to avoid redundant computation.
+ 152.
+System auto-invalidates meal plan cache when an elder's prescriptions are updated.
+Node.js REST API Server (Express)
+ 153.
+API server provides CRUD endpoints for Residents: GET /api/residents, GET /api/residents/:id, POST, PUT, DELETE.
+ 154.
+API server provides CRUD endpoints for Caretakers: GET /api/caretakers, POST, PUT, DELETE, plus assign-resident.
+ 155.
+API server provides Leave Request endpoints: GET all, GET by caretaker, POST new request, PUT approve/reject.
+ 156.
+API server provides Prescription endpoints: GET by resident, POST new prescription with medications.
+ 157.
+API server provides Appointment endpoints: GET, POST, PUT for booking and status updates.
+ 158.
+API server provides Emotional State endpoints: GET history by resident, POST new emotion record.
+ 159.
+API server provides Meal Plan endpoints: GET cached plan, POST/PUT regenerate.
+ 160.
+API server provides System Component endpoints: GET status, POST add, PUT toggle status.
+ 161.
+API server uses Firebase Admin SDK middleware for JWT token validation and role-based access control.
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 8 of 9
+
+
+=== PAGE 9 ===
+MySQL Database (Normalized Schema)
+ 162.
+Database has 12 tables: users, residents, prescriptions, medications, finished_medications, caretakers, caretaker_residents,
+appointments, emotional_states, leave_requests, emergency_alerts, system_components, meal_plans.
+ 163.
+All tables use foreign keys with CASCADE DELETE for referential integrity.
+ 164.
+Database uses utf8mb4 character set for full Unicode support.
+ 165.
+Database includes seed data with sample residents, caretakers, prescriptions, and emotional states.
+Firebase Services
+ 166.
+Firebase Authentication handles user sign-up, sign-in, and session management for all 3 roles (admin, caretaker,
+patient).
+ 167.
+Firebase Firestore provides real-time push updates for emotion records and care alerts across devices.
+ 168.
+Firebase Storage stores uploaded prescription images with download URLs linked to database records.
+Docker Containerization & DevOps
+ 169.
+System is fully containerized with 4 Docker services: Frontend (Node Alpine), API Server (Node Alpine), Prescription
+Reader (Python Slim), MySQL.
+ 170.
+Docker Compose configures an isolated bridge network (careconnect-network) for inter-service communication.
+ 171.
+Docker uses persistent volumes: mysql_data for database storage, prescription_models for ML model cache.
+ 172.
+All containers include /health endpoints with automated health checks and restart policies.
+ 173.
+Production compose file includes Nginx reverse proxy with resource limits and SSL support.
+TOTAL FEATURES DOCUMENTED: 173
+Admin Web App Features: 1–42 | Caretaker App Features: 43–96 | Elder/Orphan App Features: 97–132 | ML Web System Features:
+133–173
+CareConnect — Complete System Features Specification
+ML-Based Elder & Orphan Care Platform
+Confidential — CareConnect System Analysis Document
+Page 9 of 9
+
+

@@ -1,6 +1,6 @@
-import { CRNNOCREngine, OCRResult } from '../ml/crnn-ocr/CRNNOCREngine';
-import { geminiVisionOCR, isGeminiEnabled } from '../ml/nlp/geminiService';
-import { analyzePrescriptionWithDonut, isDonutEnabledSync, checkDonutHealth } from '../ml/nlp/donutService';
+import { CRNNOCREngine, OCRResult } from '../client/crnn-ocr/CRNNOCREngine';
+import { geminiVisionOCR, isGeminiEnabled } from '../client/nlp/geminiService';
+import { analyzePrescriptionWithDonut, isDonutEnabledSync, checkDonutHealth } from '../client/nlp/donutService';
 
 export class OCREngine {
   modelVersion: string;
@@ -60,7 +60,7 @@ export class OCREngine {
       } else if (isGeminiEnabled()) {
         console.log(`[OCREngine] CRNN not available — using Gemini Vision OCR`);
       } else {
-        console.warn(`[OCREngine] No OCR backend available. Set VITE_GEMINI_API_KEY in .env or start the Donut server`);
+        console.warn('[OCREngine] No OCR backend available. Configure server GEMINI_API_KEY or start the Donut server.');
       }
     }
   }

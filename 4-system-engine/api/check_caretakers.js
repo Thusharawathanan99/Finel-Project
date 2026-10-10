@@ -1,3 +1,4 @@
+import './db.js'; // Loads configuration relative to the module, independent of cwd.
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -11,10 +12,10 @@ async function checkCaretakers() {
 
   try {
     const connection = await mysql.createConnection({
-      host: 'localhost',
+      host: process.env.MYSQL_HOST || 'localhost', port: Number(process.env.MYSQL_PORT || 3306),
       user: process.env.MYSQL_USER || 'root',
-      password: process.env.MYSQL_PASSWORD || 'Nadun@123',
-      database: 'careconnect'
+      password: process.env.MYSQL_PASSWORD ?? '',
+      database: process.env.MYSQL_DATABASE || 'careconnect'
     });
     
     console.log(`✅ Connected to MySQL successfully!`);

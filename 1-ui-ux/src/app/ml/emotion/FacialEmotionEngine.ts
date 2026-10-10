@@ -5,6 +5,7 @@
  */
 
 import * as faceapi from 'face-api.js';
+import { EXPRESSION_WEIGHTS } from '../../../../../shared/experimentalWellness';
 
 export interface EmotionDetectionResult {
   dominant: string;
@@ -16,15 +17,7 @@ export interface EmotionDetectionResult {
 
 // Emotion-to-wellness score mapping
 // Higher score = more positive emotional state
-const EMOTION_WELLNESS_WEIGHTS: Record<string, number> = {
-  happy: 95,
-  surprised: 70,
-  neutral: 60,
-  sad: 25,
-  fearful: 20,
-  disgusted: 15,
-  angry: 10,
-};
+const EMOTION_WELLNESS_WEIGHTS = EXPRESSION_WEIGHTS;
 
 export class FacialEmotionEngine {
   private modelsLoaded: boolean = false;
@@ -68,18 +61,51 @@ export class FacialEmotionEngine {
     await this.initialize();
 
     try {
-      const detection = await faceapi
+      if (typeof HTMLVideoElement !== 'undefined' && input instanceof HTMLVideoElement) {
+        if (input.videoWidth === 0 || input.videoHeight === 0 || input.paused) {
+          return {
+            dominant: 'neutral',
+            scores: {},
+            wellnessScore: Number.NaN,
+            faceDetected: false,
+            processingTimeMs: performance.now() - startTime,
+          };
+        }
+      }
+
+      // Pass 1: Standard balance between speed and accuracy
+      let detection = await faceapi
         .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions({
-          inputSize: 224,
-          scoreThreshold: 0.5,
+          inputSize: 320,
+          scoreThreshold: 0.20,
         }))
         .withFaceExpressions();
+
+      // Pass 2: Sensitive pass with smaller input size for tricky lighting/angles
+      if (!detection) {
+        detection = await faceapi
+          .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions({
+            inputSize: 224,
+            scoreThreshold: 0.12,
+          }))
+          .withFaceExpressions();
+      }
+
+      // Pass 3: Detailed pass for distant or smaller faces
+      if (!detection) {
+        detection = await faceapi
+          .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions({
+            inputSize: 416,
+            scoreThreshold: 0.10,
+          }))
+          .withFaceExpressions();
+      }
 
       if (!detection) {
         return {
           dominant: 'neutral',
           scores: {},
-          wellnessScore: 50,
+          wellnessScore: Number.NaN,
           faceDetected: false,
           processingTimeMs: performance.now() - startTime,
         };
@@ -112,6 +138,10 @@ export class FacialEmotionEngine {
         wellnessScore += probability * (EMOTION_WELLNESS_WEIGHTS[emotion] || 50);
       }
       wellnessScore = Math.round(Math.max(0, Math.min(100, wellnessScore)));
+      const leading = Object.values(scores).sort((a, b) => b - a);
+      if (detection.detection.score < 0.6 || leading[0] < 0.45 || leading[0] - leading[1] < 0.1) {
+        dominant = 'uncertain'; wellnessScore = Number.NaN;
+      }
 
       const processingTimeMs = performance.now() - startTime;
       console.log(`[FaceAPI] Detected emotion: ${dominant} (${(maxScore * 100).toFixed(1)}%) — wellness: ${wellnessScore}`);
@@ -128,7 +158,7 @@ export class FacialEmotionEngine {
       return {
         dominant: 'neutral',
         scores: {},
-        wellnessScore: 50,
+        wellnessScore: Number.NaN,
         faceDetected: false,
         processingTimeMs: performance.now() - startTime,
       };
@@ -177,9 +207,13 @@ export class FacialEmotionEngine {
 
     const detectLoop = async () => {
       while (running) {
-        if (videoElement.readyState >= 2) {
-          const result = await this.analyze(videoElement);
-          if (running) onResult(result);
+        try {
+          if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && !videoElement.paused) {
+            const result = await this.analyze(videoElement);
+            if (running) onResult(result);
+          }
+        } catch (err) {
+          console.warn('[FaceAPI] Detection tick warning:', err);
         }
         await new Promise(r => setTimeout(r, intervalMs));
       }

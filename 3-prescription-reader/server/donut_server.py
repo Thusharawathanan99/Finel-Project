@@ -20,7 +20,7 @@ import os
 import sys
 import asyncio
 import traceback
-import multiprocessing
+import hmac
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from transformers import DonutProcessor, VisionEncoderDecoderModel
+from donut_safety import normalize_medication, normalize_medications, decode_image_base64, load_image_bytes
 
 # ─────────────────────────────────────────────
 # Configuration
@@ -47,9 +48,13 @@ LOCAL_MODEL_PATH_PRIMARY = Path(__file__).parent.parent / "best_model"
 LOCAL_MODEL_PATH_SECONDARY = Path(__file__).parent / "models" / "donut-prescription"
 
 # Server settings
-HOST = "0.0.0.0"
+HOST = os.getenv("DONUT_HOST", "127.0.0.1")
 PORT = 8000
 MAX_IMAGE_SIZE_MB = 10
+MAX_IMAGE_BYTES = MAX_IMAGE_SIZE_MB * 1024 * 1024
+MAX_IMAGE_PIXELS = max(1, min(16000000, int(os.getenv("DONUT_MAX_IMAGE_PIXELS", "16000000"))))
+MAX_PENDING_INFERENCES = max(1, min(16, int(os.getenv("DONUT_MAX_PENDING_INFERENCES", "2"))))
+INTERNAL_TOKEN = os.getenv("DONUT_INTERNAL_TOKEN", "")
 MAX_CONCURRENT_INFERENCES = max(1, int(os.getenv("DONUT_MAX_CONCURRENT_INFERENCES", "1")))
 INFERENCE_QUEUE_TIMEOUT_SEC = max(10, int(os.getenv("DONUT_QUEUE_TIMEOUT_SEC", "180")))
 CPU_MAX_LENGTH = max(128, int(os.getenv("DONUT_CPU_MAX_LENGTH", "384")))
@@ -238,13 +243,13 @@ class DonutModel:
         processing_time_ms = (time.time() - start_time) * 1000
 
         # Log raw model output for debugging
-        log.info(f"📝 Raw model output ({len(generated_text)} chars): {generated_text[:500]}")
+        log.info("Model generated %d characters", len(generated_text))
 
         # Parse medications from the generated text
-        medications = self._parse_medications(generated_text)
+        medications = normalize_medications(self._parse_medications(generated_text))
 
-        # Compute confidence based on beam search score
-        confidence = min(0.95, 0.70 + 0.05 * len(medications))
+        # Parser scores are unvalidated heuristics, not beam-search or clinical confidence.
+        confidence = sum(m["confidence"] for m in medications) / len(medications) if medications else 0
 
         max_length = GPU_MAX_LENGTH if active_device == "cuda" else CPU_MAX_LENGTH
         num_beams = GPU_NUM_BEAMS if active_device == "cuda" else CPU_NUM_BEAMS
@@ -253,222 +258,92 @@ class DonutModel:
             f"{processing_time_ms:.0f}ms, {confidence:.0%} confidence "
             f"(beams={num_beams}, max_length={max_length})"
         )
-        if medications:
-            for med in medications:
-                log.info(f"   💊 {med['drugName']} {med['dosage']} — {med['frequency']}")
-        else:
-            log.warning(f"   ⚠️ No medications parsed from raw text. Text may need manual review.")
+        patient_name = self._extract_patient_name(generated_text)
+        doctor_name = self._extract_doctor_name(generated_text)
+        date_issued = self._extract_date(generated_text)
 
         return {
             "raw_text": generated_text,
+            "patient_name": patient_name,
+            "doctor_name": doctor_name,
+            "date": date_issued,
             "medications": medications,
             "confidence": confidence,
+            "confidence_kind": "unvalidated-heuristic",
+            "needsReview": True,
             "model": "donut-prescription-v1",
             "device": active_device,
             "processing_time_ms": round(processing_time_ms, 1),
         }
 
     def _parse_medications(self, text: str) -> list[dict]:
-        """
-        Extract structured medication data from Donut's raw output text.
-
-        Strategy order:
-          1. Donut training format: "medications: - Drug Dose Unit - Freq ... signature:"
-          2. JSON (if model outputs structured data)
-          3. Regex patterns for standard clinical formats
-          4. Broad line-level fallback
-        """
+        if not isinstance(text, str):
+            return []
+        native = self._extract_donut_format_medications(text)
+        if native:
+            return native
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                payload = json.loads(match.group())
+                if isinstance(payload, dict):
+                    if "medications" in payload:
+                        return normalize_medications(payload["medications"])
+                    return normalize_medications([payload])
+            except (json.JSONDecodeError, ValueError, TypeError):
+                return []
         medications = []
-
-        # ── Strategy 1: Donut training-data format ──
-        # The model was trained on ground truth like:
-        #   "medications: - Ibuprofen 5 mg - Take twice daily - Metformin 100 mg - Every 12 hours signature: ..."
-        # Each medication is a pair: "- DrugName Dose Unit" followed by "- Frequency"
-        med_section = self._extract_donut_format_medications(text)
-        if med_section:
-            return med_section
-
-        # ── Strategy 2: JSON ──
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', text)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                if isinstance(parsed, dict):
-                    if "medications" in parsed:
-                        return parsed["medications"]
-                    if "drugName" in parsed or "drug_name" in parsed:
-                        return [self._normalize_med(parsed)]
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # ── Strategy 3: Standard clinical regex ──
-        patterns = [
-            # "1. Lisinopril 10mg once daily"
-            r'(?:^|\n)\s*(?:\d+[.)]\s*)?([A-Za-z][\w\s-]*?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s*(.*?)(?=\n|$)',
-            # "Tab. Metformin 500mg 1-0-1"
-            r'(?:Tab\.?|Cap\.?|Inj\.?|Syp\.?)\s+([A-Za-z][\w-]*(?:\s+[\w-]+)?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml)\s*([\d-]+(?:\s*[-x]\s*[\d-]+)*)',
-        ]
-
-        for pattern in patterns:
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                drug_name = match.group(1).strip()
-                dosage_num = match.group(2)
-                dosage_unit = match.group(3)
-                frequency = match.group(4).strip() if match.group(4) else "as directed"
-
-                if len(drug_name) < 3:
-                    continue
-
-                medications.append({
-                    "drugName": drug_name,
-                    "dosage": f"{dosage_num}{dosage_unit}",
-                    "frequency": frequency or "as directed",
-                    "confidence": 0.75,
-                    "source": "donut",
-                })
-
-        if medications:
-            return medications
-
-        # ── Strategy 4: Broader line-level parsing ──
-        for line in text.split("\n"):
-            line = re.sub(r'^[\s\-•*\d.)]+', '', line.strip())
-            if len(line) < 4:
-                continue
-
-            match = re.search(
-                r'([A-Za-z][A-Za-z0-9\- ]{1,40})\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\b(?:\s*[,;-]?\s*(.*))?$',
-                line,
-                re.IGNORECASE
-            )
-            if not match:
-                continue
-
-            drug_name = re.sub(r'\s+', ' ', match.group(1)).strip()
-            dosage_num = match.group(2)
-            dosage_unit = match.group(3)
-            frequency = (match.group(4) or "").strip() or "as directed"
-
-            if len(drug_name) < 3:
-                continue
-
-            medications.append({
-                "drugName": drug_name,
-                "dosage": f"{dosage_num}{dosage_unit}",
-                "frequency": frequency,
-                "confidence": 0.65,
-                "source": "donut",
-            })
-
-        if medications:
-            return medications
-
-        # ── Strategy 5: Ultra-basic fallback ──
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line or len(line) < 5:
-                continue
-            basic_match = re.match(
-                r'(.+?)\s+(\d+\s*(?:mg|mcg|g|ml))\s*(.*)',
-                line, re.IGNORECASE
-            )
-            if basic_match:
-                medications.append({
-                    "drugName": basic_match.group(1).strip(),
-                    "dosage": basic_match.group(2).strip(),
-                    "frequency": basic_match.group(3).strip() or "as directed",
-                    "confidence": 0.50,
-                    "source": "donut",
-                })
-
-        return medications
+        pattern = r"(?:^|\n)[ \t]*(?:\d+[.)][ \t]*)?(?:(?:Drug|Medication|Rx|Tab\.?|Cap\.?|Inj\.?|Syp\.?)[ \t]*:?[ \t]+)?([A-Za-z][\w \t'-]*?)[ \t]+(\d+(?:\.\d+)?|\.\d+)[ \t]*(mg|mcg|g|ml|units?|IU|mEq)[ \t]*([^\r\n]*)"
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            medications.append({"drugName": match.group(1).strip(), "dosage": match.group(2) + match.group(3), "frequency": match.group(4).strip() or "Needs Review"})
+        return normalize_medications(medications)
 
     def _extract_donut_format_medications(self, text: str) -> list[dict]:
-        """
-        Parse the Donut model's native output format.
-
-        Training ground truth format:
-          "... medications: - Ibuprofen 5 mg - Take twice daily - Ciprofloxacin 25 mg - At bedtime signature: ..."
-
-        Each medication is a PAIR of dash-items:
-          1. "- DrugName Dose Unit"  (contains a number + mg/mcg/g/ml)
-          2. "- Frequency"           (the next dash-item, no dosage pattern)
-        """
-        # Extract the medications section
-        med_match = re.search(
-            r'medications:\s*(.*?)(?:\s*signature:|$)',
-            text,
-            re.IGNORECASE | re.DOTALL
-        )
-        if not med_match:
+        match = re.search(r'medications\s*:\s*(.*?)(?=\bsignature\s*:|\bdoctor\s*:|$)', text, re.IGNORECASE | re.DOTALL)
+        if not match:
             return []
-
-        med_section = med_match.group(1).strip()
-        if not med_section:
-            return []
-
-        # Split on " - " to get individual items
-        # The section looks like: "- Drug1 10 mg - Frequency1 - Drug2 20 mg - Frequency2"
-        items = re.split(r'\s*-\s+', med_section)
-        items = [item.strip() for item in items if item.strip()]
-
-        if not items:
-            return []
-
-        log.info(f"[Parser] Donut format: found {len(items)} dash-items in medications section")
-
+        section = match.group(1).strip().lstrip('-').strip()
+        dose = r'(?:\d+(?:\.\d+)?|\.\d+)[ \t]*(?:mg|mcg|g|ml|units?|IU|mEq)\b'
+        # Split only at another drug-and-strength, preserving hyphens in 1 - 0 - 1.
+        entries = re.split(r'\s+-\s+(?=[A-Za-z][A-Za-z \t-]*?\s+' + dose + ')', section, flags=re.IGNORECASE)
         medications = []
-        i = 0
-        while i < len(items):
-            item = items[i]
+        for entry in entries:
+            item = re.match(r"^([A-Za-z][\w \t'-]*?)\s+(\d+(?:\.\d+)?|\.\d+)\s*(mg|mcg|g|ml|units?|IU|mEq)\b\s*(?:-\s*)?(.*)$", entry, re.IGNORECASE | re.DOTALL)
+            if item:
+                medications.append({"drugName": item.group(1), "dosage": item.group(2) + item.group(3), "frequency": item.group(4).strip() or "Needs Review"})
+        return normalize_medications(medications)
 
-            # Check if this item contains a drug+dosage pattern (e.g., "Ibuprofen 5 mg")
-            drug_match = re.match(
-                r'^([A-Za-z][A-Za-z\s\-]*?)\s+(\d+(?:\.\d+)?)\s*(mg|mcg|g|ml|units?|IU|mEq)\s*$',
-                item,
-                re.IGNORECASE
-            )
+    def _extract_patient_name(self, text: str) -> str:
+        """Extract patient name from raw prescription text."""
+        match = re.search(r'(?:patient(?:\s+name)?|pt(?:\s+name)?|name)\s*[:\-]\s*([A-Za-z\s\.\,\-\'\"]{2,40})', text, re.IGNORECASE)
+        if match:
+            raw = match.group(1).split("\n")[0].split(",")[0].strip()
+            if len(raw) > 2 and "rx" not in raw.lower() and "dr" not in raw.lower():
+                return raw
+        return "Needs Review"
 
-            if drug_match:
-                drug_name = drug_match.group(1).strip()
-                dosage = f"{drug_match.group(2)} {drug_match.group(3)}"
-                frequency = "as directed"
+    def _extract_doctor_name(self, text: str) -> str:
+        """Extract prescribing doctor name from raw prescription text."""
+        match = re.search(r'(?:dr\.?|doctor|physician|prescriber)\s*[:\-]?\s*([A-Za-z\s\.\,\-]{2,40})', text, re.IGNORECASE)
+        if match:
+            raw = match.group(1).split("\n")[0].split(",")[0].strip()
+            if not raw.lower().startswith("dr") and not raw.lower().startswith("doctor"):
+                raw = f"Dr. {raw}"
+            if len(raw) > 4:
+                return raw
+        return "Needs Review"
 
-                # The next item should be the frequency (if it exists and isn't another drug)
-                if i + 1 < len(items):
-                    next_item = items[i + 1]
-                    # Check if the next item is NOT a drug (i.e., no number+unit pattern)
-                    is_drug = re.search(r'\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|units?|IU|mEq)', next_item, re.IGNORECASE)
-                    if not is_drug:
-                        frequency = next_item.strip()
-                        i += 1  # Skip the frequency item
-
-                if len(drug_name) >= 3:
-                    medications.append({
-                        "drugName": drug_name,
-                        "dosage": dosage,
-                        "frequency": frequency,
-                        "confidence": 0.82,
-                        "source": "donut",
-                    })
-                    log.info(f"   💊 {drug_name} {dosage} — {frequency}")
-
-            i += 1
-
-        if medications:
-            log.info(f"[Parser] ✅ Extracted {len(medications)} medications from Donut format")
-
-        return medications
+    def _extract_date(self, text: str) -> str:
+        """Extract prescription date from raw text."""
+        match = re.search(r'(?:date|issued|rx\s*date)\s*[:\-]?\s*([0-9]{1,4}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{1,4})', text, re.IGNORECASE)
+        if not match:
+            match = re.search(r'\b([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})\b', text)
+        if match:
+            return match.group(1).strip()
+        return "Needs Review"
 
     def _normalize_med(self, med_dict: dict) -> dict:
-        """Normalize medication field names to our standard format."""
-        return {
-            "drugName": med_dict.get("drugName") or med_dict.get("drug_name", "Unknown"),
-            "dosage": med_dict.get("dosage", ""),
-            "frequency": med_dict.get("frequency", "as directed"),
-            "confidence": med_dict.get("confidence", 0.75),
-            "source": "donut",
-        }
+        return normalize_medication(med_dict)
 
 
 # ─────────────────────────────────────────────
@@ -478,6 +353,7 @@ class DonutModel:
 donut = DonutModel()
 inference_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
 active_inferences = 0
+pending_inferences = 0
 active_lock = asyncio.Lock()
 
 
@@ -524,153 +400,91 @@ async def health_check():
     }
 
 
-def _run_inference_in_subprocess(image_bytes: bytes) -> dict:
-    """
-    Run Donut inference in an isolated subprocess.
-    If the model crashes (segfault, C-level error), only the subprocess dies.
-    The main server stays alive.
-    """
-    try:
-        result = donut.predict(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
-        return result
-    except Exception as e:
-        return {
-            "error": str(e),
-            "raw_text": "",
-            "medications": [],
-            "confidence": 0,
-            "model": "donut-prescription-v1",
-            "device": donut.device,
-            "processing_time_ms": 0,
-        }
-
-
 async def _run_inference_with_queue(pil_image: Image.Image) -> dict:
-    global active_inferences
-
+    global active_inferences, pending_inferences
+    async with active_lock:
+        if pending_inferences >= MAX_PENDING_INFERENCES + MAX_CONCURRENT_INFERENCES:
+            raise HTTPException(503, "Inference queue is full. Please try again later.")
+        pending_inferences += 1
+    acquired = False
+    started = False
     try:
-        await asyncio.wait_for(inference_semaphore.acquire(), timeout=INFERENCE_QUEUE_TIMEOUT_SEC)
-    except TimeoutError:
-        raise HTTPException(
-            503,
-            "Server is busy processing other images. Please retry in a few moments."
-        )
-
-    try:
+        try:
+            await asyncio.wait_for(inference_semaphore.acquire(), timeout=INFERENCE_QUEUE_TIMEOUT_SEC)
+            acquired = True
+        except TimeoutError:
+            raise HTTPException(503, "Inference queue timed out. Please try again later.")
         async with active_lock:
             active_inferences += 1
-
-        # Convert image to JPEG bytes for safe cross-boundary passing
-        buf = io.BytesIO()
-        pil_image.save(buf, format="JPEG", quality=95)
-        image_bytes = buf.getvalue()
-
-        # Run in threadpool (model is loaded in this process)
-        result = await run_in_threadpool(donut.predict, Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+            started = True
+        # Keep the inference permit until the worker actually finishes, even if the client disconnects.
+        worker = asyncio.create_task(run_in_threadpool(donut.predict, pil_image))
+        try:
+            result = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await worker
+            raise
+        if not isinstance(result, dict) or result.get("error"):
+            raise HTTPException(503, "Model inference is unavailable. Please try again later.")
         return result
-    except Exception as e:
-        log.error(f"Inference pipeline error: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "raw_text": "",
-            "medications": [],
-            "confidence": 0,
-            "model": "donut-prescription-v1",
-            "device": donut.device,
-            "processing_time_ms": 0,
-        }
+    except HTTPException:
+        raise
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.error("Inference worker failed")
+        raise HTTPException(503, "Model inference is unavailable. Please try again later.")
     finally:
         async with active_lock:
-            active_inferences = max(0, active_inferences - 1)
-        inference_semaphore.release()
+            pending_inferences = max(0, pending_inferences - 1)
+            if started:
+                active_inferences = max(0, active_inferences - 1)
+        if acquired:
+            inference_semaphore.release()
+
+
+@app.middleware("http")
+async def internal_access(request, call_next):
+    if request.url.path.startswith("/api/predict"):
+        supplied = request.headers.get("x-donut-token", "")
+        local = request.client and request.client.host in {"127.0.0.1", "::1", "localhost"}
+        if (INTERNAL_TOKEN and not hmac.compare_digest(supplied, INTERNAL_TOKEN)) or (not INTERNAL_TOKEN and not local):
+            return JSONResponse(status_code=403, content={"error": "Internal inference access only."})
+        length = request.headers.get("content-length")
+        if length is None:
+            return JSONResponse(status_code=411, content={"error": "Content-Length is required."})
+        try:
+            if int(length) < 0 or int(length) > 4 * ((MAX_IMAGE_BYTES + 2) // 3) + 65536:
+                return JSONResponse(status_code=413, content={"error": "Image request exceeds the byte limit."})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "Invalid Content-Length."})
+    return await call_next(request)
 
 
 @app.post("/api/predict")
 async def predict(image: UploadFile = File(...)):
-    """
-    Process a prescription image and return extracted medications.
-
-    Accepts: image file (JPEG, PNG, WebP)
-    Returns: JSON with medications, confidence, and raw text
-    """
     if not donut.is_ready:
-        raise HTTPException(503, "Model is still loading. Please try again in a moment.")
-
-    # Validate file type
-    content_type = image.content_type or ""
-    if not content_type.startswith("image/"):
-        raise HTTPException(400, f"Expected image file, got: {content_type}")
-
-    # Read and validate size
-    image_bytes = await image.read()
-    size_mb = len(image_bytes) / (1024 * 1024)
-    if size_mb > MAX_IMAGE_SIZE_MB:
-        raise HTTPException(400, f"Image too large: {size_mb:.1f}MB (max {MAX_IMAGE_SIZE_MB}MB)")
-
-    log.info(f"📷 Processing image: {image.filename} ({size_mb:.1f}MB)")
-
+        raise HTTPException(503, "Model is still loading.")
+    if image.content_type not in {"image/jpeg", "image/png", "image/webp", "image/bmp"}:
+        raise HTTPException(415, "Use a JPEG, PNG, WebP, or BMP image.")
+    data = await image.read(MAX_IMAGE_BYTES + 1)
     try:
-        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        result = await _run_inference_with_queue(pil_image)
-        return JSONResponse(content=result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"Inference failed: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": f"Model inference failed: {str(e)}",
-                "raw_text": "",
-                "medications": [],
-                "confidence": 0,
-                "model": "donut-prescription-v1",
-                "device": donut.device,
-                "processing_time_ms": 0,
-            }
-        )
+        pil_image = load_image_bytes(data, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS)
+    except ValueError as error:
+        raise HTTPException(413 if "limit" in str(error) else 400, str(error))
+    return JSONResponse(content=await _run_inference_with_queue(pil_image))
 
 
 @app.post("/api/predict-base64")
 async def predict_base64(payload: dict):
-    """
-    Process a base64-encoded prescription image.
-    Accepts: { "image": "data:image/jpeg;base64,..." }
-    """
     if not donut.is_ready:
         raise HTTPException(503, "Model is still loading.")
-
-    import base64
-
-    image_data = payload.get("image", "")
-    if not image_data:
-        raise HTTPException(400, "Missing 'image' field")
-
-    # Strip data URL prefix if present
-    if "base64," in image_data:
-        image_data = image_data.split("base64,")[1]
-
     try:
-        image_bytes = base64.b64decode(image_data)
-        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        result = await _run_inference_with_queue(pil_image)
-        return JSONResponse(content=result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"Base64 inference failed: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": f"Model inference failed: {str(e)}",
-                "raw_text": "",
-                "medications": [],
-                "confidence": 0,
-                "model": "donut-prescription-v1",
-                "device": donut.device,
-                "processing_time_ms": 0,
-            }
-        )
+        data = decode_image_base64(payload.get("image"), MAX_IMAGE_BYTES)
+        pil_image = load_image_bytes(data, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS)
+    except ValueError as error:
+        raise HTTPException(413 if "limit" in str(error) else 400, str(error))
+    return JSONResponse(content=await _run_inference_with_queue(pil_image))
 
 
 @app.get("/api/model-info")

@@ -31,7 +31,7 @@ export function AlertPanel({ alerts, onAcknowledge }: AlertPanelProps) {
       case 'medium':
         return 'bg-yellow-50 border-yellow-300 text-yellow-900';
       case 'low':
-        return 'bg-blue-50 border-blue-300 text-blue-900';
+        return 'bg-teal-50 border-teal-300 text-teal-900';
       default:
         return 'bg-gray-50 border-gray-300 text-gray-900';
     }

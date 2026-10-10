@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef, lazy } from 'react';
 import { Dashboard } from '../models/Dashboard';
 import { User } from '../models/User';
 import { Resident } from '../models/Resident';
@@ -17,12 +17,18 @@ import {
   Home,
   Utensils
 } from 'lucide-react';
-import { PrescriptionUpload } from './PrescriptionUpload';
+const PrescriptionUpload = lazy(() => import('./PrescriptionUpload').then(module => ({ default: module.PrescriptionUpload })));
 import { AppointmentBooking } from './AppointmentBooking';
 import { Appointment } from '../models/Appointment';
-import { MealPlanView } from './MealPlanView';
+const MealPlanView = lazy(() => import('./MealPlanView').then(module => ({ default: module.MealPlanView })));
+import { PersistedCareAlerts } from './PersistedCareAlerts';
+import { MonitoringDevices } from './monitoring/MonitoringDevices';
+import { MonitoringIncidents } from './monitoring/MonitoringIncidents';
+import { MonitoringConsentPanel } from './monitoring/MonitoringConsentPanel';
+import { MedicationReminderPanel } from './MedicationReminderPanel';
+import { CareRecordPanel } from './monitoring/CareRecordPanel';
 import { clearMealPlanCache } from '../ml/meal-plan/MealPlanEngine';
-import { caretakersApi } from '../services/apiService';
+import { caretakersApi, appointmentsApi, sosApi } from '../services/apiService';
 
 interface CaretakerDashboardProps {
   user: User;
@@ -33,11 +39,15 @@ interface CaretakerDashboardProps {
 
 export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: CaretakerDashboardProps) {
   const [activeView, setActiveView] = useState<'home' | 'residents' | 'leave' | 'alerts'>('home');
-  const [selectedResident, setSelectedResident] = useState<Resident | null>(null);
+  const [selectedResidentState, setSelectedResident] = useState<Resident | null>(null);
   const [showPrescriptionUpload, setShowPrescriptionUpload] = useState(false);
   const [showAppointmentBooking, setShowAppointmentBooking] = useState(false);
   const [showLeaveRequest, setShowLeaveRequest] = useState(false);
   const [showEmergencyConfirm, setShowEmergencyConfirm] = useState(false);
+  const [emergencyResidentId, setEmergencyResidentId] = useState('');
+  const [emergencySending, setEmergencySending] = useState(false);
+  const [emergencyError, setEmergencyError] = useState('');
+  const [emergencySuccess, setEmergencySuccess] = useState('');
   const [finishingMedicationKey, setFinishingMedicationKey] = useState<string | null>(null);
   const [medicationsTab, setMedicationsTab] = useState<'current' | 'finished' | 'mealplan'>('current');
 
@@ -45,6 +55,9 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
   const caretakerResidents = currentCaretaker && currentCaretaker.assignedResidents?.length > 0
     ? dashboard.residents.filter(r => currentCaretaker.assignedResidents.includes(r.residentId))
     : [];
+  const selectedResident = caretakerResidents.find(resident=>resident.residentId===selectedResidentState?.residentId) || null;
+  useEffect(()=>{if(selectedResidentState && !selectedResident){setSelectedResident(null);setShowPrescriptionUpload(false);setShowAppointmentBooking(false);}},[selectedResidentState?.residentId,caretakerResidents.map(resident=>resident.residentId).join(',')]);
+  const measuredScores=caretakerResidents.map(resident=>resident.getLatestEmotionalState()?.stateScore).filter((score):score is number=>typeof score==='number'&&Number.isFinite(score));
 
   const criticalAlerts = dashboard.getCriticalAlerts();
   const activeAlerts = dashboard.getActiveAlerts();
@@ -55,26 +68,45 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
     endDate: '',
     reason: ''
   });
+  const [leaveError, setLeaveError] = useState('');
+  const [leaveSubmitting, setLeaveSubmitting] = useState(false);
+  const leaveLock = useRef(false);
+  const localToday = () => { const today = new Date(); return [today.getFullYear(), String(today.getMonth()+1).padStart(2,'0'), String(today.getDate()).padStart(2,'0')].join('-'); };
 
   const selectedResidentFinishedMeds = selectedResident
     ? selectedResident.finishedMedications
     : [];
 
-  const handleEmergencyAlert = () => {
-    const alert = new EmergencyAlert(
-      `EMG-${Date.now()}`,
-      currentCaretaker?.caretakerId || user.userId,
-      currentCaretaker?.name || user.name,
-      'EMERGENCY: Immediate assistance required!',
-      'Main Care Area'
-    );
-    dashboard.addEmergencyAlert(alert);
-    setShowEmergencyConfirm(false);
-    onRefresh();
+  const openEmergencyAlert = () => {
+    setEmergencyResidentId(selectedResident?.residentId || caretakerResidents[0]?.residentId || '');
+    setEmergencyError('');
+    setEmergencySuccess('');
+    setShowEmergencyConfirm(true);
+  };
+
+  const handleEmergencyAlert = async () => {
+    if (emergencySending) return;
+    const resident = caretakerResidents.find(r => r.residentId === emergencyResidentId);
+    if (!resident) { setEmergencyError('Select an assigned resident for this emergency.'); return; }
+    setEmergencySending(true);
+    setEmergencyError('');
+    try {
+      await sosApi.create({ residentId: resident.residentId, residentName: resident.name, message: `EMERGENCY: Immediate assistance required! Sent by ${currentCaretaker?.name || user.name}.` });
+      setEmergencySuccess('Emergency alert sent to the administrator.');
+      setShowEmergencyConfirm(false);
+    } catch (error) {
+      setEmergencyError(error instanceof Error ? error.message : 'Emergency alert could not be sent. Please try again.');
+    } finally {
+      setEmergencySending(false);
+    }
   };
 
   const handleLeaveSubmit = async () => {
-    if (!currentCaretaker) return;
+    if (!currentCaretaker || leaveLock.current) return;
+    if (!leaveForm.startDate || !leaveForm.endDate || leaveForm.endDate < leaveForm.startDate || !leaveForm.reason.trim()) { setLeaveError('Choose valid dates, with the end on or after the start, and enter a reason.'); return; }
+    leaveLock.current = true;
+    setLeaveSubmitting(true);
+    setLeaveError('');
     
     const requestData = {
       startDate: leaveForm.startDate,
@@ -90,8 +122,8 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
         response.requestId || `LV-${Date.now()}`,
         currentCaretaker.caretakerId,
         currentCaretaker.name,
-        new Date(leaveForm.startDate),
-        new Date(leaveForm.endDate),
+        new Date(`${leaveForm.startDate}T00:00:00`),
+        new Date(`${leaveForm.endDate}T00:00:00`),
         leaveForm.reason
       );
       currentCaretaker.addLeaveRequest(request);
@@ -99,15 +131,20 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
       setLeaveForm({ startDate: '', endDate: '', reason: '' });
       onRefresh();
     } catch (error) {
-      console.error('Failed to submit leave request:', error);
-      alert('Failed to submit leave request. Please try again.');
+      setLeaveError(error instanceof Error ? error.message : 'Leave request could not be saved. Please retry.');
+    } finally {
+      leaveLock.current = false;
+      setLeaveSubmitting(false);
     }
   };
 
   const handlePrescriptionUpload = async (
     doctorName: string,
     imageFile: File | null,
-    medications?: Medication[]
+    medications?: Medication[],
+    patientName?: string,
+    dateIssued?: string,
+    rawText?: string
   ) => {
     if (!selectedResident) return;
 
@@ -116,17 +153,16 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
         selectedResident.residentId,
         doctorName,
         medications,
-        imageFile
+        imageFile,
+        patientName,
+        dateIssued,
+        rawText
       );
       if (!saved) {
         throw new Error('Database save failed. Ensure API server/MySQL are running, then retry.');
       }
     } else {
-      await dashboard.processPrescriptionImage(
-        selectedResident.residentId,
-        imageFile || 'mock-image',
-        doctorName
-      );
+      throw new Error('Review and confirm the prescription medicines before saving.');
     }
 
     setShowPrescriptionUpload(false);
@@ -134,22 +170,16 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
     onRefresh();
   };
 
-  const handleBookAppointment = (doctorName: string, specialization: string, date: Date, time: string, reason: string) => {
-    if (selectedResident) {
-      const appointment = new Appointment(
-        `APT-${Date.now()}`,
-        selectedResident.residentId,
-        selectedResident.name,
-        doctorName,
-        specialization,
-        date,
-        time,
-        reason
-      );
-      dashboard.addAppointment(appointment);
-      setShowAppointmentBooking(false);
-      onRefresh();
-    }
+  const handleBookAppointment = async (doctorName: string, specialization: string, date: Date, time: string, reason: string) => {
+    if (!selectedResident) throw new Error('Select a resident before booking.');
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const appointmentDate = `${year}-${month}-${day}`;
+    const response = await appointmentsApi.create({ residentId: selectedResident.residentId, residentName: selectedResident.name, doctorName, specialization, appointmentDate, appointmentTime: time, reason });
+    dashboard.addAppointment(new Appointment(response.appointmentId, selectedResident.residentId, selectedResident.name, doctorName, specialization, date, time, reason));
+    setShowAppointmentBooking(false);
+    onRefresh();
   };
 
   const handleFinishMedication = async (prescriptionId: string, med: Medication) => {
@@ -173,9 +203,10 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-50 via-blue-50 to-purple-50 pb-20">
+    <div className="care-dashboard min-h-screen pb-28">
+      {emergencySuccess && <div role="status" className="mx-4 mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{emergencySuccess}</div>}
       {/* Header - Mobile Optimized */}
-      <div className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+      <div className="care-dashboard-header bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
         <div className="px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-3">
@@ -217,13 +248,19 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
       </div>
 
       {/* Content */}
-      <div className="px-4 py-4">
+      <div className="care-dashboard-content px-4 py-6 max-w-6xl mx-auto">
+        <section className="care-workspace-intro">
+          <div><span>CARECONNECT / YOUR WORKSPACE</span><h1>Connected care starts here.</h1><p>A thoughtful workspace for the people who count on you.</p></div>
+          <div className="care-workspace-emblem" aria-hidden="true"><img src="/careconnect-companion.png" alt="" /></div>
+        </section>
+        <PersistedCareAlerts caretakerId={user.userId} />
+        <MonitoringIncidents residents={caretakerResidents} />
         {activeView === 'home' && (
           <div className="space-y-4">
             {/* Stats Grid */}
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
-                <Users className="w-8 h-8 text-blue-500 mb-2" />
+                <Users className="w-8 h-8 text-teal-500 mb-2" />
                 <p className="text-2xl font-bold text-gray-800">{caretakerResidents.length}</p>
                 <p className="text-xs text-gray-600">Residents</p>
               </div>
@@ -237,12 +274,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
               <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
                 <Activity className="w-8 h-8 text-green-500 mb-2" />
                 <p className="text-2xl font-bold text-gray-800">
-                  {caretakerResidents.length > 0 ? Math.round(
-                    caretakerResidents.reduce((sum, r) => {
-                      const latest = r.getLatestEmotionalState();
-                      return sum + (latest?.stateScore || 0);
-                    }, 0) / caretakerResidents.length
-                  ) : 0}
+                  {measuredScores.length ? Math.round(measuredScores.reduce((sum,score)=>sum+score,0)/measuredScores.length) : '--'}
                 </p>
                 <p className="text-xs text-gray-600">Avg Wellness</p>
               </div>
@@ -259,10 +291,10 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
             {/* Quick Actions */}
             <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
               <h3 className="font-semibold text-gray-800 mb-3 text-base">Quick Actions</h3>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <button
                   onClick={() => setActiveView('residents')}
-                  className="py-3 bg-blue-50 text-blue-700 rounded-lg font-medium text-sm active:scale-95 transition-transform"
+                  className="py-3 bg-teal-50 text-teal-700 rounded-lg font-medium text-sm active:scale-95 transition-transform"
                 >
                   View Residents
                 </button>
@@ -279,7 +311,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                   Check Alerts
                 </button>
                 <button
-                  onClick={() => setShowEmergencyConfirm(true)}
+                  onClick={openEmergencyAlert}
                   className="py-3 bg-red-50 text-red-700 rounded-lg font-medium text-sm active:scale-95 transition-transform flex items-center justify-center gap-1"
                 >
                   <AlertTriangle className="w-4 h-4" />
@@ -294,7 +326,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                 <h3 className="font-semibold text-gray-800 text-base">Recent Residents</h3>
                 <button 
                   onClick={() => setActiveView('residents')}
-                  className="text-xs text-blue-600"
+                  className="text-xs text-teal-600"
                 >
                   View All
                 </button>
@@ -313,7 +345,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-300 to-purple-300 flex items-center justify-center text-white text-sm font-semibold">
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-teal-500 to-emerald-600 flex items-center justify-center text-white text-sm font-semibold">
                             {resident.name.charAt(0)}
                           </div>
                           <div>
@@ -342,6 +374,9 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
         {activeView === 'residents' && (
           <div className="space-y-4">
             <h2 className="text-xl font-bold text-gray-800">All Residents</h2>
+            {selectedResident && <MonitoringConsentPanel key={selectedResident.residentId} residentId={selectedResident.residentId} staff />}
+            {selectedResident && <CareRecordPanel key={selectedResident.residentId} residentId={selectedResident.residentId} staff />}
+            {selectedResident && <MedicationReminderPanel key={selectedResident.residentId} resident={selectedResident} />}
 
             {selectedResident ? (
               /* Resident Detail View */
@@ -351,7 +386,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                     setSelectedResident(null);
                     setMedicationsTab('current');
                   }}
-                  className="text-sm text-blue-600 mb-2"
+                  className="text-sm text-teal-600 mb-2"
                 >
                   ← Back to list
                 </button>
@@ -359,7 +394,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                 {/* Resident Header */}
                 <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
                   <div className="flex items-start gap-3 mb-4">
-                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-300 to-purple-300 flex items-center justify-center text-white text-xl font-semibold">
+                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-teal-500 to-emerald-600 flex items-center justify-center text-white text-xl font-semibold">
                       {selectedResident.name.charAt(0)}
                     </div>
                     <div className="flex-1">
@@ -370,9 +405,9 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
 
                   {/* Quick Stats */}
                   <div className="grid grid-cols-3 gap-2">
-                    <div className="bg-blue-50 rounded-lg p-2 border border-blue-200 text-center">
-                      <p className="text-xs text-blue-700 mb-1">Medications</p>
-                      <p className="text-lg font-bold text-blue-900">
+                    <div className="bg-teal-50 rounded-lg p-2 border border-teal-200 text-center">
+                      <p className="text-xs text-teal-700 mb-1">Medications</p>
+                      <p className="text-lg font-bold text-teal-900">
                         {selectedResident.getAllMedications().length}
                       </p>
                     </div>
@@ -385,7 +420,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                     <div className="bg-green-50 rounded-lg p-2 border border-green-200 text-center">
                       <p className="text-xs text-green-700 mb-1">Wellness</p>
                       <p className="text-lg font-bold text-green-900">
-                        {selectedResident.getLatestEmotionalState()?.stateScore || '--'}
+                        {selectedResident.getLatestEmotionalState()?.stateScore ?? '--'}
                       </p>
                     </div>
                   </div>
@@ -395,7 +430,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     onClick={() => setShowPrescriptionUpload(true)}
-                    className="py-3 bg-blue-500 text-white rounded-lg font-medium text-sm active:scale-95 transition-transform flex items-center justify-center gap-2"
+                    className="py-3 bg-teal-500 text-white rounded-lg font-medium text-sm active:scale-95 transition-transform flex items-center justify-center gap-2"
                   >
                     <Upload className="w-4 h-4" />
                     Rx
@@ -426,7 +461,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                       onClick={() => setMedicationsTab('current')}
                       className={`py-2 px-1 rounded-lg text-xs font-medium border transition-colors ${
                         medicationsTab === 'current'
-                          ? 'bg-blue-50 border-blue-300 text-blue-700'
+                          ? 'bg-teal-50 border-teal-300 text-teal-700'
                           : 'bg-white border-gray-200 text-gray-600'
                       }`}
                     >
@@ -457,7 +492,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                   </div>
 
                   {medicationsTab === 'mealplan' ? (
-                    <MealPlanView resident={selectedResident} />
+                    <MealPlanView resident={selectedResident} onGenerate={() => dashboard.generateMealPlan(selectedResident.residentId)} />
                   ) : medicationsTab === 'current' ? (
                     <div className="space-y-2">
                       {selectedResident.getAllMedications().length === 0 && (
@@ -556,7 +591,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-300 to-purple-300 flex items-center justify-center text-white font-semibold">
+                          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-teal-500 to-emerald-600 flex items-center justify-center text-white font-semibold">
                             {resident.name.charAt(0)}
                           </div>
                           <div>
@@ -600,7 +635,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
 
             {currentCaretaker?.leaveRequests.length ? (
               <div className="space-y-2">
-                {currentCaretaker.leaveRequests.reverse().map(request => (
+                {[...currentCaretaker.leaveRequests].reverse().map(request => (
                   <div key={request.requestId} className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex-1">
@@ -648,6 +683,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
         {activeView === 'alerts' && (
           <div className="space-y-4">
             <h2 className="text-xl font-bold text-gray-800">Alerts</h2>
+            <MonitoringDevices residents={caretakerResidents} readOnly />
 
             {/* Emergency Alerts */}
             {emergencyAlerts.length > 0 && (
@@ -677,7 +713,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                     alert.severityLevel === 'critical' ? 'border-red-500' :
                     alert.severityLevel === 'high' ? 'border-orange-500' :
                     alert.severityLevel === 'medium' ? 'border-yellow-500' :
-                    'border-blue-500'
+                    'border-teal-500'
                   } ${alert.acknowledged ? 'opacity-50' : ''}`}
                 >
                   <div className="flex items-start justify-between">
@@ -686,7 +722,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                         alert.severityLevel === 'critical' ? 'bg-red-100 text-red-800' :
                         alert.severityLevel === 'high' ? 'bg-orange-100 text-orange-800' :
                         alert.severityLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-blue-100 text-blue-800'
+                        'bg-teal-100 text-teal-800'
                       }`}>
                         {alert.severityLevel.toUpperCase()}
                       </span>
@@ -704,7 +740,8 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
       </div>
 
       {/* Bottom Navigation */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+      <div className="care-bottom-nav fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+        <div className="care-nav-brand"><Users aria-hidden="true" /><div>CareConnect.<small>Care team</small></div></div>
         <div className="px-2 py-2">
           <div className="flex justify-around">
             <button
@@ -773,7 +810,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
 
       {/* Leave Request Modal */}
       {showLeaveRequest && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
             <div className="bg-gradient-to-r from-green-500 to-teal-500 text-white px-6 py-4 flex items-center justify-between rounded-t-2xl">
               <h3 className="text-lg font-semibold">Request Leave</h3>
@@ -788,7 +825,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                   type="date"
                   value={leaveForm.startDate}
                   onChange={(e) => setLeaveForm({ ...leaveForm, startDate: e.target.value })}
-                  min={new Date().toISOString().split('T')[0]}
+                  min={localToday()}
                   className="w-full px-4 py-3 border border-gray-300 rounded-xl"
                   required
                 />
@@ -799,7 +836,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                   type="date"
                   value={leaveForm.endDate}
                   onChange={(e) => setLeaveForm({ ...leaveForm, endDate: e.target.value })}
-                  min={leaveForm.startDate || new Date().toISOString().split('T')[0]}
+                  min={leaveForm.startDate || localToday()}
                   className="w-full px-4 py-3 border border-gray-300 rounded-xl"
                   required
                 />
@@ -815,6 +852,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                   required
                 />
               </div>
+              {leaveError && <p role="alert" className="text-sm text-red-700">{leaveError}</p>}
               <div className="grid grid-cols-2 gap-2 pt-2">
                 <button
                   onClick={() => setShowLeaveRequest(false)}
@@ -824,7 +862,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                 </button>
                 <button
                   onClick={handleLeaveSubmit}
-                  disabled={!leaveForm.startDate || !leaveForm.endDate || !leaveForm.reason}
+                  disabled={leaveSubmitting || !leaveForm.startDate || !leaveForm.endDate || leaveForm.endDate < leaveForm.startDate || !leaveForm.reason.trim()}
                   className="py-3 bg-green-500 text-white rounded-xl font-medium disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   <Send className="w-4 h-4" />
@@ -838,7 +876,7 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
 
       {/* Emergency Confirmation Modal */}
       {showEmergencyConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full">
             <div className="bg-red-500 text-white px-6 py-4 rounded-t-2xl text-center">
               <AlertTriangle className="w-12 h-12 mx-auto mb-2" />
@@ -849,8 +887,17 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                 This will send an immediate emergency alert to the administrator. 
                 Use only for urgent situations requiring immediate assistance.
               </p>
+              <label className="block mb-4 text-sm font-medium text-gray-700">Resident
+                <select className="mt-2 w-full rounded-xl border border-gray-300 p-3" value={emergencyResidentId} onChange={e => setEmergencyResidentId(e.target.value)} disabled={emergencySending}>
+                  <option value="">Select resident...</option>
+                  {caretakerResidents.map(r => <option key={r.residentId} value={r.residentId}>{r.name}</option>)}
+                </select>
+              </label>
+              {caretakerResidents.length === 0 && <p className="mb-4 text-sm text-red-800">No assigned resident is available. Ask the administrator to assign a resident.</p>}
+              {emergencyError && <p role="alert" className="mb-4 text-sm text-red-800">{emergencyError}</p>}
               <div className="grid grid-cols-2 gap-3">
                 <button
+                  disabled={emergencySending}
                   onClick={() => setShowEmergencyConfirm(false)}
                   className="py-3 border-2 border-gray-300 text-gray-700 rounded-xl font-medium"
                 >
@@ -858,9 +905,10 @@ export function CaretakerDashboard({ user, dashboard, onLogout, onRefresh }: Car
                 </button>
                 <button
                   onClick={handleEmergencyAlert}
+                  disabled={emergencySending || !emergencyResidentId}
                   className="py-3 bg-red-500 text-white rounded-xl font-bold"
                 >
-                  Send Alert
+                  {emergencySending ? 'Sending...' : 'Send Alert'}
                 </button>
               </div>
             </div>

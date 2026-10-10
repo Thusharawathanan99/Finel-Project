@@ -1,10 +1,25 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Send, Loader2, CheckCircle2, Pill, Camera, RefreshCw, Video } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import type { ChangeEvent } from 'react';
+import { AlertCircle, Camera, CheckCircle2, FileText, Loader2, RefreshCw, Send, Upload, X } from 'lucide-react';
 import { Resident } from '../models/Resident';
-import { Medication } from '../models/Medication';
-import { FacialEmotionEngine, EmotionDetectionResult } from '../ml/emotion/FacialEmotionEngine';
+import { EmotionalState } from '../models/EmotionalState';
+import { auth } from '../firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 import { emotionsApi } from '../services/apiService';
-import { pushEmotionUpdate, pushAlert } from '../services/firestoreService';
+import { faceReportHTML, photoFromCanvas, photoFromFile } from '../services/faceImage';
+import type { FacePhoto } from '../services/faceImage';
+import { FACE_LANGUAGES, buildFaceReportText, validateFaceReport } from '../../../../shared/faceReport';
+import type { FaceLanguage, FaceReport } from '../../../../shared/faceReport';
+import { getLiveFaceCopy, buildLiveReportText, getCloudExpressionDisplay } from '../../../../shared/liveFace';
+import type { TrackedLiveFrame } from '../../../../shared/liveFace';
+import { startLiveFaceDetection, analyzeFacePhoto } from '../ml/live/LiveFaceSession';
+import { FaceOverlay, LiveFaceResults, LiveResultStrip } from './LiveFacePanel';
+import { FaceQualityPanel } from './FaceQualityPanel';
+import { FaceCareHelpPanel } from './FaceCareHelpPanel';
+import { ExperimentalWellnessReview } from './ExperimentalWellnessReview';
+import { isFaceFrameStale, useFaceFrameClock } from './useFaceFrameClock';
+import { getFaceProviderStatusCopy, validateFaceProviderStatus } from '../../../../shared/faceProviderStatus';
+import type { FaceProviderUiState } from '../../../../shared/faceProviderStatus';
 
 interface EmotionLoggerModalProps {
   resident: Resident;
@@ -12,591 +27,542 @@ interface EmotionLoggerModalProps {
   onLogged: () => void;
 }
 
-/** Map face-api emotion keys to display info */
-const EMOTION_DISPLAY: Record<string, { emoji: string; label: string; color: string; bgColor: string; borderColor: string }> = {
-  happy:      { emoji: '😊', label: 'Happy',      color: 'text-emerald-700', bgColor: 'bg-emerald-50',  borderColor: 'border-emerald-300' },
-  sad:        { emoji: '😢', label: 'Sad',        color: 'text-blue-700',    bgColor: 'bg-blue-50',     borderColor: 'border-blue-300' },
-  angry:      { emoji: '😤', label: 'Angry',      color: 'text-red-700',     bgColor: 'bg-red-50',      borderColor: 'border-red-300' },
-  fearful:    { emoji: '😰', label: 'Fearful',    color: 'text-amber-700',   bgColor: 'bg-amber-50',    borderColor: 'border-amber-300' },
-  disgusted:  { emoji: '🤢', label: 'Disgusted',  color: 'text-lime-700',    bgColor: 'bg-lime-50',     borderColor: 'border-lime-300' },
-  surprised:  { emoji: '😲', label: 'Surprised',  color: 'text-violet-700',  bgColor: 'bg-violet-50',   borderColor: 'border-violet-300' },
-  neutral:    { emoji: '😐', label: 'Neutral',    color: 'text-gray-700',    bgColor: 'bg-gray-50',     borderColor: 'border-gray-300' },
-};
+const primary = 'inline-flex items-center justify-center gap-2 rounded-xl bg-teal-700 px-4 py-3 font-semibold text-white hover:bg-teal-800 disabled:opacity-40 disabled:cursor-not-allowed';
+const secondary = 'inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40';
+const feelings = ['Happy', 'Sad', 'Angry', 'Anxious', 'Neutral'] as const;
 
-function getEmotionCategory(emotion: string): 'positive' | 'neutral' | 'negative' | 'side-effect' {
-  if (['happy', 'surprised'].includes(emotion)) return 'positive';
-  if (['neutral'].includes(emotion)) return 'neutral';
-  return 'negative';
-}
-
-type Step = 'camera' | 'analyzing' | 'result' | 'medicine' | 'submitting' | 'success' | 'error';
-
-// Singleton engine instance to avoid re-loading models on every modal open
-let sharedEngine: FacialEmotionEngine | null = null;
-function getEngine(): FacialEmotionEngine {
-  if (!sharedEngine) {
-    sharedEngine = new FacialEmotionEngine('/models/face-api');
-  }
-  return sharedEngine;
-}
-
+// The component name stays compatible with existing dashboard imports.
+// Experimental scores require a captured frame and explicit patient review.
 export function EmotionLoggerModal({ resident, onClose, onLogged }: EmotionLoggerModalProps) {
-  const [step, setStep] = useState<Step>('camera');
-  const [animateIn, setAnimateIn] = useState(false);
-  const [cameraError, setCameraError] = useState('');
-  const [modelLoading, setModelLoading] = useState(true);
-  const [detectionResult, setDetectionResult] = useState<EmotionDetectionResult | null>(null);
-  const [liveResult, setLiveResult] = useState<EmotionDetectionResult | null>(null);
-  const [selectedMedicine, setSelectedMedicine] = useState<Medication | null>(null);
-  const [note, setNote] = useState('');
+  const [language, setLanguage] = useState<FaceLanguage>('en');
+  const [photo, setPhoto] = useState<FacePhoto | null>(null);
+  const [report, setReport] = useState<FaceReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState(false);
   const [error, setError] = useState('');
-
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const [feeling, setFeeling] = useState('');
+  const [score, setScore] = useState<number | null>(null);
+  const [note, setNote] = useState('');
+  const [medicine, setMedicine] = useState('');
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const engineRef = useRef<FacialEmotionEngine>(getEngine());
-  const cleanupRef = useRef<(() => void) | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const mounted = useRef(true);
+  const sequence = useRef(0);
+  const controller = useRef<AbortController | null>(null);
+  const context = useRef('');
+  const currentUid = auth.currentUser?.uid || '';
+  context.current = currentUid + ':' + resident.residentId;
+  const observationId = useRef<string | null>(null);
+  const saveLock = useRef(false);
+  const cameraGeneration = useRef(0);
+  const [liveFrame, setLiveFrame] = useState<(TrackedLiveFrame & {fps?:number}) | null>(null);
+  const [localPhotoFrame, setLocalPhotoFrame] = useState<TrackedLiveFrame | null>(null);
+  const [liveStatus, setLiveStatus] = useState('loading');
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [points, setPoints] = useState(true);
+  const [detector, setDetector] = useState<'tiny'|'ssd'>('tiny');
+  const [cloudAssist, setCloudAssist] = useState(false);
+  const [cloudSample, setCloudSample] = useState<{photo:FacePhoto;report:FaceReport}|null>(null);
+  const [cameraAspect, setCameraAspect] = useState(4/3);
+  const liveAbort = useRef<AbortController | null>(null);
+  const localGeneration = useRef(0);
+  const cloudGeneration = useRef(0);
+  const cloudAbort = useRef<AbortController | null>(null);
+  const photoAbort = useRef<AbortController | null>(null);
+  const cloudNextAt = useRef(0);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const liveRate = useRef<{at:number;fps:number|null}|null>(null);
+  const liveBackend=useRef<string|undefined>(undefined);
+  const [providerState, setProviderState] = useState<FaceProviderUiState>('checking');
+  const [providerRetry, setProviderRetry] = useState(0);
+  const providerAbort = useRef<AbortController | null>(null);
+  const providerTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const now = useFaceFrameClock(cameraEnabled && !photo && !!currentUid);
+  const t = getLiveFaceCopy(language);
+  const providerCopy = getFaceProviderStatusCopy(language);
+  const cloudAllowed = providerState === 'available' || providerState === 'unavailable';
+  const staleLiveFrame = !!liveFrame && isFaceFrameStale(liveFrame, now);
+  const freshLiveFrame = cameraEnabled && cameraReady && liveStatus === 'running' && !staleLiveFrame ? liveFrame : null;
+  const isCurrent = (id: number, session: string) => mounted.current && id === sequence.current &&
+    context.current === session && session === (auth.currentUser?.uid || '') + ':' + resident.residentId;
 
-  const allMedications = resident.getAllMedications();
+  function stopCamera() {
+    liveAbort.current?.abort();
+    cloudAbort.current?.abort();
+    cloudGeneration.current += 1;
+    cameraGeneration.current += 1;
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }
 
-  useEffect(() => {
-    requestAnimationFrame(() => setAnimateIn(true));
-  }, []);
-
-  // Initialize camera & face-api models
-  useEffect(() => {
-    let cancelled = false;
-
-    const init = async () => {
-      // Load face-api models
-      try {
-        setModelLoading(true);
-        await engineRef.current.initialize();
-        if (!cancelled) setModelLoading(false);
-      } catch (err) {
-        console.error('[EmotionLogger] Model load failed:', err);
-        if (!cancelled) {
-          setCameraError('Failed to load emotion detection models. Please try again.');
-          setModelLoading(false);
-        }
+  async function startCamera() {
+    stopCamera();
+    const id = cameraGeneration.current;
+    const session = context.current;
+    setCameraReady(false);
+    setCameraError(false);
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('camera');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false,
+      });
+      if (!mounted.current || id !== cameraGeneration.current || context.current !== session ||
+          session !== (auth.currentUser?.uid || '') + ':' + resident.residentId) {
+        stream.getTracks().forEach(track => track.stop());
         return;
       }
-
-      // Start camera
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false,
-        });
-
-        if (cancelled) {
-          stream.getTracks().forEach(t => t.stop());
-          return;
-        }
-
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-
-          // Start live emotion preview (updates every 1s for better responsiveness)
-          const stopContinuous = engineRef.current.startContinuousDetection(
-            videoRef.current,
-            (result) => {
-              if (!cancelled) {
-                setLiveResult(result);
-              }
-            },
-            1000
-          );
-          cleanupRef.current = stopContinuous;
-        }
-      } catch (err: any) {
-        console.error('[EmotionLogger] Camera error:', err);
-        if (!cancelled) {
-          if (err.name === 'NotAllowedError') {
-            setCameraError('Camera access denied. Please allow camera access in your browser settings.');
-          } else if (err.name === 'NotFoundError') {
-            setCameraError('No camera found on this device.');
-          } else {
-            setCameraError('Could not access camera. Please try again.');
-          }
-        }
-      }
-    };
-
-    init();
-
-    return () => {
-      cancelled = true;
-      cleanupRef.current?.();
-      streamRef.current?.getTracks().forEach(t => t.stop());
-    };
-  }, []);
-
-  const stopCamera = useCallback(() => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-  }, []);
-
-  const handleCapture = () => {
-    if (!liveResult || !liveResult.faceDetected) {
-      setCameraError('No face detected. Please look clearly at the camera.');
-      return;
-    }
-
-    setStep('analyzing');
-    stopCamera();
-
-    // Use the exact result they were seeing on screen for better consistency
-    setDetectionResult(liveResult);
-
-    // Simulate analyzing delay for better UX
-    setTimeout(() => {
-      setStep('result');
-    }, 1500);
-  };
-
-  const handleRetake = async () => {
-    setDetectionResult(null);
-    setSelectedMedicine(null);
-    setNote('');
-    setCameraError('');
-    setStep('camera');
-
-    // Restart camera
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false,
-      });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
-        cleanupRef.current = engineRef.current.startContinuousDetection(
-          videoRef.current,
-          (r) => setLiveResult(r),
-          1000
-        );
       }
+      if (mounted.current && id === cameraGeneration.current) setCameraReady(true);
     } catch {
-      setCameraError('Could not restart camera.');
+      if (mounted.current && id === cameraGeneration.current) setCameraError(true);
     }
-  };
+  }
 
-  const handleSubmit = async () => {
-    if (!detectionResult) return;
-
-    setStep('submitting');
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      sequence.current += 1;
+      controller.current?.abort();
+      photoAbort.current?.abort();
+      providerAbort.current?.abort();
+      if (providerTimeout.current !== null) clearTimeout(providerTimeout.current);
+      stopCamera();
+    };
+  }, []);
+  useEffect(() => {
+    sequence.current += 1;
+    controller.current?.abort();
+    setReport(null);
+    setPhoto(null);
     setError('');
+    setScore(null);
+    setFeeling('');
+    setNote('');
+    setMedicine('');
+    setSaved(false);
+    setBusy(false);
+    setCloudAssist(false);
+    setCloudSample(null);
+    setLocalPhotoFrame(null);
+    setLiveFrame(null);
+    setCameraEnabled(true);
+    observationId.current = null;
+  }, [resident.residentId, currentUid]);
+  useEffect(() => {
+    if (!photo && cameraEnabled) void startCamera();
+    return stopCamera;
+  }, [photo, cameraEnabled, resident.residentId, currentUid]);
+  useEffect(() => {
+    const abort = new AbortController();
+    liveAbort.current = abort;
+    const session = context.current;
+    setLiveFrame(null);
+    liveRate.current=null;
+    liveBackend.current=undefined;
+    if (photo || !cameraEnabled || !cameraReady || !videoRef.current) return () => abort.abort();
+    void startLiveFaceDetection(videoRef.current, frame => {
+      if (!abort.signal.aborted && mounted.current && context.current === session &&
+          session === (auth.currentUser?.uid || '') + ':' + resident.residentId) {
+        const at=performance.now(), previous=liveRate.current;
+        const sample=previous&&at>previous.at?1000/(at-previous.at):null;
+        const fps=sample===null?null:previous?.fps==null?sample:previous.fps*.7+sample*.3;
+        liveRate.current={at,fps};
+        setLiveFrame({...frame,fps:fps??undefined});
+      }
+    }, status => {
+      if (!abort.signal.aborted && mounted.current && context.current===session) {
+        setLiveStatus(status.state);
+        if(status.backend)liveBackend.current=status.backend;
+        if (status.state==='unavailable'||status.state==='stopped') {setLiveFrame(null);liveRate.current=null;}
+      }
+    }, {signal:abort.signal,detector});
+    return () => abort.abort();
+  }, [photo, cameraReady, cameraEnabled, detector, currentUid, resident.residentId]);
+  useEffect(() => {
+    const id = ++localGeneration.current;
+    const abort = new AbortController();photoAbort.current=abort;
+    const session = context.current;
+    setLocalPhotoFrame(null);
+    if (!photo) return;
+    setLiveStatus('loading');
+    void analyzeFacePhoto(photo.dataUrl,'ssd',{signal:abort.signal,capturedAt:photo.capturedAt}).then(frame => {
+      if (mounted.current && localGeneration.current === id && context.current === session &&
+          session === (auth.currentUser?.uid || '') + ':' + resident.residentId) {setLocalPhotoFrame(frame);setLiveStatus('running');}
+    }).catch(() => {if (mounted.current && localGeneration.current === id) setLiveStatus('unavailable');});
+    return () => {localGeneration.current += 1;abort.abort();};
+  }, [photo, currentUid, resident.residentId]);
+  useEffect(() => {
+    const generation = ++cloudGeneration.current;
+    let timer: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    const session = context.current;
+    const current = () => !cancelled && mounted.current && cloudGeneration.current === generation && context.current === session &&
+      session === (auth.currentUser?.uid || '') + ':' + resident.residentId;
+    if (!cloudAssist || !cloudAllowed || photo || !cameraEnabled || !cameraReady || !currentUid) return;
+    const sample = async () => {
+      if (!current()) return;
+      if (Date.now()<cloudNextAt.current) {timer=setTimeout(sample,cloudNextAt.current-Date.now());return;}
+      const video = videoRef.current;
+      if (document.hidden || !video || video.readyState < 2) {timer=setTimeout(sample,15000);return;}
+      const abort = new AbortController();cloudAbort.current=abort;
+      cloudNextAt.current=Date.now()+15000;
+      const timeout=setTimeout(()=>abort.abort(),25000);
+      let delay=15000;
+      try {
+        const selected=photoFromCanvas(video,video.videoWidth,video.videoHeight);
+        const result=validateFaceReport(await emotionsApi.analyzeImage(selected.dataUrl,{signal:abort.signal}));
+        if (result.image.width !== selected.width || result.image.height !== selected.height) throw Error('FACE_UNAVAILABLE');
+        if (current()) setCloudSample({photo:selected,report:result});
+      } catch (failure:any) {
+        if (current() && !abort.signal.aborted) {
+          setError(failure?.status === 429 ? 'rateLimit' : failure?.errorCode || 'FACE_UNAVAILABLE');
+          delay=failure?.status === 429 ? 60000 : 30000;
+          cloudNextAt.current=Date.now()+delay;
+          if (failure?.errorCode === 'FACE_NOT_CONFIGURED' || failure?.status === 401) setCloudAssist(false);
+        }
+      } finally {clearTimeout(timeout);if(current())timer=setTimeout(sample,delay);}
+    };
+    void sample();
+    return () => {cancelled=true;clearTimeout(timer);cloudAbort.current?.abort();};
+  }, [cloudAssist, cloudAllowed, photo, cameraEnabled, cameraReady, currentUid, resident.residentId]);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.querySelector<HTMLElement>('select')?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') handleClose();
+      if (event.key === 'Tab' && dialogRef.current) {
+        const items=Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled),select:not(:disabled),input:not(:disabled),textarea:not(:disabled),summary')).filter(item=>item.getClientRects().length>0);
+        const first=items[0],last=items[items.length-1];
+        if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+        else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+      }
+    };
+    window.addEventListener('keydown', keydown);
+    return () => {window.removeEventListener('keydown', keydown);previous?.focus();};
+  }, []);
 
-    const emotionInfo = EMOTION_DISPLAY[detectionResult.dominant] || EMOTION_DISPLAY['neutral'];
-    const category = getEmotionCategory(detectionResult.dominant);
+  useEffect(() => {
+    const abort = new AbortController();
+    providerAbort.current = abort;
+    const session = context.current, uid = currentUid;
+    const current = () => !abort.signal.aborted && mounted.current && context.current === session && auth.currentUser?.uid === uid;
+    setProviderState(uid ? 'checking' : 'unavailable');
+    setCloudAssist(false);
+    if (!uid) return () => abort.abort();
+    const timeout = setTimeout(() => {
+      if (current()) { setProviderState('unavailable'); setCloudAssist(false); }
+      abort.abort();
+    }, 10000);
+    providerTimeout.current = timeout;
+    const unsubscribe = onAuthStateChanged(auth, user => {
+      if (user?.uid === uid) return;
+      abort.abort(); clearTimeout(timeout); cloudAbort.current?.abort();
+      if (mounted.current && context.current === session) {
+        setProviderState('unavailable'); setCloudAssist(false); setLiveFrame(null); setCloudSample(null);
+      }
+    });
+    void (async () => {
+      try {
+        const status = validateFaceProviderStatus(await emotionsApi.faceStatus({ signal: abort.signal }));
+        if (current()) { setProviderState(status.configurationState); if (status.configurationState !== 'available') setCloudAssist(false); }
+      } catch { if (current()) setProviderState('unavailable'); }
+      finally { clearTimeout(timeout); if (providerTimeout.current === timeout) providerTimeout.current = null; }
+    })();
+    return () => { unsubscribe(); clearTimeout(timeout); abort.abort(); if (providerTimeout.current === timeout) providerTimeout.current = null; };
+  }, [currentUid, resident.residentId, providerRetry]);
 
-    try {
-      // 1. Save to MySQL
-      await emotionsApi.record({
-        residentId: resident.residentId,
-        stateScore: detectionResult.wellnessScore,
-        emotionLabel: emotionInfo.label,
-        category,
-        relatedMedicine: selectedMedicine?.drugName || null,
-        note: note.trim() || null,
-      });
+  function handleClose() {
+    mounted.current = false;
+    photoAbort.current?.abort();
+    sequence.current += 1;
+    controller.current?.abort();
+    providerAbort.current?.abort();
+    if (providerTimeout.current !== null) clearTimeout(providerTimeout.current);
+    stopCamera();
+    onClose();
+  }
 
-      // 2. Push real-time update to Firestore (caretaker sees this live)
-      // We run these in the background so they don't block UI if Firestore hangs
-      Promise.all([
-        pushEmotionUpdate({
-          residentId: resident.residentId,
-          residentName: resident.name,
-          stateScore: detectionResult.wellnessScore,
-          emotionalLevel: emotionInfo.label,
-        }),
-        ...(category === 'negative' ? [
-          pushAlert({
-            type: 'wellness',
-            severity: detectionResult.wellnessScore <= 20 ? 'high' : 'medium',
-            message: `${resident.name} is feeling ${emotionInfo.label}${selectedMedicine ? ` (may be related to ${selectedMedicine.drugName})` : ''}. Wellness: ${detectionResult.wellnessScore}/100`,
-            residentId: resident.residentId,
-            residentName: resident.name,
-            targetRoles: ['caretaker', 'admin'],
-            acknowledged: false,
-          })
-        ] : []),
-      ]).catch(e => console.warn('[EmotionLogger] Optional Firestore update failed:', e));
-
-      setStep('success');
-      setTimeout(() => {
-        onLogged();
-        onClose();
-      }, 2500);
-    } catch (err) {
-      console.error('[EmotionLogger] Submit error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save. Try again.');
-      setStep('result');
+  function handleCapture() {
+    const video = videoRef.current;
+    if (!video || !cameraReady || video.readyState < 2 || !video.videoWidth) {
+      setError('camera');
+      return;
     }
-  };
+    try {
+      const captured = photoFromCanvas(video, video.videoWidth, video.videoHeight);
+      sequence.current += 1;
+      controller.current?.abort();
+      setPhoto(captured);
+      setReport(null);
+      setError('');
+      stopCamera();
+    } catch { setError('INVALID_IMAGE'); }
+  }
 
-  const emotionInfo = detectionResult
-    ? (EMOTION_DISPLAY[detectionResult.dominant] || EMOTION_DISPLAY['neutral'])
-    : null;
+  async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    const id = ++sequence.current;
+    const session = context.current;
+    controller.current?.abort();
+    setBusy(true);
+    setReport(null);
+    setPhoto(null);
+    setError('');
+    try {
+      const selected = await photoFromFile(file);
+      if (!isCurrent(id, session)) return;
+      setPhoto(selected);
+      stopCamera();
+    } catch {
+      if (isCurrent(id, session)) setError('INVALID_IMAGE');
+    } finally {
+      if (isCurrent(id, session)) setBusy(false);
+    }
+  }
 
-  const liveEmotionInfo = (liveResult && liveResult.faceDetected) 
-    ? EMOTION_DISPLAY[liveResult.dominant] 
-    : null;
+  async function handleAnalyze() {
+    if (!photo || busy || !cloudAllowed || !currentUid || auth.currentUser?.uid !== currentUid) return;
+    const selected = photo;
+    const id = ++sequence.current;
+    const session = context.current;
+    controller.current?.abort();
+    const abort = new AbortController();
+    controller.current = abort;
+    setBusy(true);
+    setError('');
+    setReport(null);
+    try {
+      const result = validateFaceReport(await emotionsApi.analyzeImage(selected.dataUrl, { signal: abort.signal }));
+      if (!isCurrent(id, session)) return;
+      if (result.image.width !== selected.width || result.image.height !== selected.height) throw new Error('FACE_UNAVAILABLE');
+      setReport(result);
+    } catch (failure: any) {
+      if (isCurrent(id, session) && !abort.signal.aborted) {
+        setError(failure?.status === 429 ? 'rateLimit' : failure?.errorCode || 'FACE_UNAVAILABLE');
+      }
+    } finally {
+      if (isCurrent(id, session)) setBusy(false);
+    }
+  }
+
+  function handleRetake() {
+    sequence.current += 1;
+    controller.current?.abort();
+    setBusy(false);
+    setPhoto(null);
+    setReport(null);
+    setError('');
+  }
+
+  function handleDownload() {
+    if (!photo || (!report && !localPhotoFrame)) return;
+    const text = [localPhotoFrame ? buildLiveReportText(localPhotoFrame,language) : '', report ? buildFaceReportText(report, language) : '', t.capturedAt + ': ' + new Date(photo.capturedAt).toLocaleString(language === 'si' ? 'si-LK' : language === 'ta' ? 'ta-LK' : 'en-GB')].filter(Boolean).join('\n\n');
+    const html = faceReportHTML(photo, text, (localPhotoFrame?.faces || report!.faces).map(face => face.box), language);
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'CareConnect-face-report-' + language + '-' + photo.capturedAt.slice(0,10) + '.html';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function handleDownloadLive() {
+    // Recheck wall-clock age at the action, even if a browser delays a render.
+    if (!freshLiveFrame || photo || !currentUid || auth.currentUser?.uid !== currentUid ||
+        isFaceFrameStale(freshLiveFrame, Date.now())) return;
+    const text = buildLiveReportText(freshLiveFrame, language);
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a'); link.href = url;
+    link.download = 'CareConnect-live-face-report-' + language + '-' + freshLiveFrame.capturedAt.slice(0, 10) + '.txt';
+    link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function changeCheckIn(update: () => void) {
+    update();
+    observationId.current = null;
+    setSaved(false);
+  }
+
+  async function handleSubmit() {
+    if (score === null || !Number.isInteger(score) || score < 0 || score > 100 || saveLock.current || saved) return;
+    saveLock.current = true;
+    const session = context.current;
+    const residentAtStart = resident;
+    const chosenScore = score;
+    const id = observationId.current || crypto.randomUUID();
+    observationId.current = id;
+    setSaving(true);
+    setError('');
+    try {
+      await emotionsApi.record({
+        observationId: id, residentId: resident.residentId, stateScore: chosenScore,
+        emotionLabel: 'Self-reported',
+        category: chosenScore > 50 ? 'positive' : chosenScore < 50 ? 'negative' : 'neutral',
+        relatedMedicine: medicine || null,
+        note: '[Self-reported]' + (feeling ? ' Feeling: ' + feeling + '.' : '') + (note.trim() ? ' ' + note.trim() : ''),
+      });
+      if (!mounted.current || context.current !== session || session !== (auth.currentUser?.uid || '') + ':' + residentAtStart.residentId) return;
+      residentAtStart.addEmotionalState(new EmotionalState(new Date(), chosenScore));
+      setSaved(true);
+      onLogged();
+    } catch {
+      if (mounted.current && context.current === session) setError('save');
+    } finally {
+      saveLock.current = false;
+      if (mounted.current && context.current === session) setSaving(false);
+    }
+  }
 
   return (
-    <div
-      className={`fixed inset-0 z-50 flex items-end sm:items-center justify-center transition-all duration-300 ${
-        animateIn ? 'bg-black/60 backdrop-blur-sm' : 'bg-transparent'
-      }`}
-      onClick={(e) => {
-        if (e.target === e.currentTarget && step !== 'submitting' && step !== 'analyzing') {
-          stopCamera();
-          onClose();
-        }
-      }}
-    >
-      <div
-        className={`bg-white w-full sm:max-w-lg sm:rounded-2xl rounded-t-3xl shadow-2xl overflow-hidden transition-all duration-500 ease-out ${
-          animateIn
-            ? 'translate-y-0 opacity-100 scale-100'
-            : 'translate-y-full sm:translate-y-0 sm:scale-95 opacity-0'
-        }`}
-        style={{ maxHeight: '95vh' }}
-      >
-        {/* Header */}
-        <div className="bg-gradient-to-r from-purple-600 via-violet-600 to-indigo-600 text-white px-5 py-4 flex items-center justify-between relative overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent animate-pulse" />
-          <div className="relative z-10">
-            <h3 className="text-lg font-bold flex items-center gap-2">
-              <Camera className="w-5 h-5" />
-              Emotion Detection
-            </h3>
-            <p className="text-xs text-purple-200 mt-0.5">
-              {step === 'camera' && 'Look at the camera — we\'ll detect how you feel'}
-              {step === 'analyzing' && 'Analyzing your expression...'}
-              {step === 'result' && 'Here\'s what we detected'}
-              {step === 'medicine' && 'Is this related to a medicine?'}
-              {step === 'submitting' && 'Sending to your caretaker...'}
-              {step === 'success' && 'Your caretaker has been notified!'}
-              {step === 'error' && 'Something went wrong'}
-            </p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#030f17]/80 p-2 backdrop-blur-sm sm:p-5">
+      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="face-title" lang={language} className="flex max-h-[96vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#f3f7f6] shadow-2xl">
+        <header className="relative flex flex-wrap items-center gap-3 border-b border-white/10 bg-[#091b24] py-5 pl-5 pr-14 text-white sm:pl-7">
+          <div className="mr-auto min-w-0">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.25em] text-emerald-300">CareConnect</p>
+            <h2 id="face-title" className="text-xl font-bold tracking-tight sm:text-2xl">{t.studio}</h2>
+            <p className="mt-1 text-xs leading-relaxed text-slate-300">{t.studioSubtitle}</p>
           </div>
-          {!['submitting', 'analyzing', 'success'].includes(step) && (
-            <button
-              onClick={() => { stopCamera(); onClose(); }}
-              className="relative z-10 p-2 hover:bg-white/20 rounded-full transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div className="overflow-y-auto" style={{ maxHeight: 'calc(95vh - 72px)' }}>
-
-          {/* ── Camera View ── */}
-          {step === 'camera' && (
-            <div className="p-4 space-y-4">
-              {cameraError ? (
-                <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center">
-                  <Camera className="w-12 h-12 mx-auto mb-3 text-red-300" />
-                  <p className="text-sm text-red-700 font-medium">{cameraError}</p>
-                  <button
-                    onClick={handleRetake}
-                    className="mt-4 px-6 py-2 bg-red-100 text-red-700 rounded-xl text-sm font-medium
-                      active:scale-95 transition-transform"
-                  >
-                    Try Again
-                  </button>
-                </div>
-              ) : (
-                <>
-                  {/* Video container */}
-                  <div className="relative rounded-2xl overflow-hidden bg-black aspect-[4/3] shadow-inner">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-full object-cover mirror"
-                      style={{ transform: 'scaleX(-1)' }}
-                    />
-
-                    {/* Loading overlay */}
-                    {modelLoading && (
-                      <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center">
-                        <Loader2 className="w-10 h-10 text-white animate-spin mb-3" />
-                        <p className="text-white text-sm font-medium">Loading AI models...</p>
-                        <p className="text-white/60 text-xs mt-1">This may take a moment</p>
-                      </div>
-                    )}
-
-                    {/* Live emotion indicator */}
-                    {!modelLoading && liveEmotionInfo && (
-                      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2 animate-in fade-in">
-                        <span className="text-xl">{liveEmotionInfo.emoji}</span>
-                        <span className="text-white text-xs font-medium">{liveEmotionInfo.label}</span>
-                        <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                      </div>
-                    )}
-
-                    {/* No face warning */}
-                    {!modelLoading && (!liveResult || !liveResult.faceDetected) && (
-                      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 flex items-center gap-2">
-                        <span className="text-sm">👤</span>
-                        <span className="text-white/70 text-xs">No face detected</span>
-                      </div>
-                    )}
-
-                    {/* Record indicator */}
-                    {!modelLoading && (
-                      <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5">
-                        <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                        <span className="text-white text-xs font-medium">LIVE</span>
-                      </div>
-                    )}
+          <select aria-label={t.language} value={language} onChange={event => setLanguage(event.target.value as FaceLanguage)} className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs text-white [&>option]:bg-slate-900">
+            {FACE_LANGUAGES.map(item => <option key={item.code} value={item.code}>{item.label}</option>)}
+          </select>
+          <button aria-label={t.close} onClick={handleClose} className="absolute right-3 top-4 rounded-full p-2 hover:bg-white/20"><X className="h-5 w-5" /></button>
+        </header>
+        <div className="overflow-y-auto p-4 sm:p-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs"><span className="text-slate-500">{t.patientContext} <strong className="ml-2 text-slate-900">{resident.name}</strong></span><span className="text-emerald-800">{t.localProcessing}</span></div>
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+            <div className="min-w-0 space-y-4">
+              <div className="overflow-hidden rounded-2xl border border-[#22434b] bg-[#091b24] shadow-sm">
+                <div className="flex items-center justify-between gap-2 border-b border-white/10 px-4 py-3"><span className="text-[11px] font-semibold text-slate-200">{photo?t.preview:t.camera}</span><span className="text-[10px] font-medium text-emerald-300">{photo?t.localPhoto:t.live}</span></div>
+                {photo ? (
+                  <div className="relative" style={{ aspectRatio: photo.width + '/' + photo.height }}>
+                    <img src={photo.dataUrl} alt={t.preview} className="block h-full w-full" />
+                    <FaceOverlay frame={localPhotoFrame} points={points} />
+                    {!localPhotoFrame && report?.faces.map((face, index) => <div key={index} className="pointer-events-none absolute rounded border-2 border-teal-300" style={{ left: face.box.x*100+'%', top: face.box.y*100+'%', width: face.box.width*100+'%', height: face.box.height*100+'%' }}>
+                      <span className="absolute left-0 top-0 rounded-br bg-teal-700 px-1.5 py-0.5 text-xs text-white">{index+1}</span>
+                    </div>)}
                   </div>
-
-                  {/* Capture button */}
-                  <button
-                    onClick={handleCapture}
-                    disabled={modelLoading}
-                    className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-2xl font-semibold
-                      shadow-lg active:scale-95 transition-all hover:shadow-purple-200 hover:shadow-xl
-                      disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
-                  >
-                    <div className="w-8 h-8 rounded-full border-4 border-white flex items-center justify-center">
-                      <div className="w-4 h-4 rounded-full bg-white" />
-                    </div>
-                    Capture My Emotion
-                  </button>
-
-                  <p className="text-xs text-gray-400 text-center">
-                    Position your face in the frame and tap capture. Your privacy is respected — images are processed locally.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* ── Analyzing ── */}
-          {step === 'analyzing' && (
-            <div className="p-10 flex flex-col items-center justify-center text-center">
-              <div className="relative mb-6">
-                <div className="w-24 h-24 rounded-full bg-gradient-to-br from-purple-100 to-indigo-100 flex items-center justify-center">
-                  <Video className="w-12 h-12 text-purple-600 animate-pulse" />
-                </div>
-                <div className="absolute -inset-3 rounded-full border-2 border-purple-300 animate-ping opacity-30" />
-                <div className="absolute -inset-6 rounded-full border border-purple-200 animate-ping opacity-15" style={{ animationDelay: '0.5s' }} />
-              </div>
-              <p className="font-bold text-gray-800 text-lg">Analyzing Expression...</p>
-              <p className="text-sm text-gray-500 mt-1">Our AI is reading your facial expressions</p>
-              <div className="flex gap-1 mt-4">
-                {['😊', '😢', '😤', '😰', '😲', '😐', '🤢'].map((e, i) => (
-                  <span
-                    key={e}
-                    className="text-2xl opacity-40 animate-bounce"
-                    style={{ animationDelay: `${i * 0.15}s` }}
-                  >
-                    {e}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* ── Result ── */}
-          {step === 'result' && detectionResult && emotionInfo && (
-            <div className="p-5 space-y-4">
-              {/* Detected emotion hero */}
-              <div className={`${emotionInfo.bgColor} rounded-2xl p-6 border-2 ${emotionInfo.borderColor} text-center relative overflow-hidden`}>
-                <div className="absolute inset-0 bg-gradient-to-br from-white/30 to-transparent" />
-                <div className="relative z-10">
-                  <span className="text-6xl block mb-3">{emotionInfo.emoji}</span>
-                  <p className={`text-2xl font-bold ${emotionInfo.color} mb-1`}>
-                    {emotionInfo.label}
-                  </p>
-                  <p className="text-sm text-gray-600">Detected from your facial expression</p>
-
-                  {/* Wellness score bar */}
-                  <div className="mt-4 max-w-xs mx-auto">
-                    <div className="flex justify-between text-xs text-gray-500 mb-1">
-                      <span>Wellness Score</span>
-                      <span className={`font-bold ${emotionInfo.color}`}>
-                        {detectionResult.wellnessScore}/100
-                      </span>
-                    </div>
-                    <div className="h-3 bg-white rounded-full overflow-hidden shadow-inner">
-                      <div
-                        className={`h-full rounded-full transition-all duration-1000 ease-out ${
-                          detectionResult.wellnessScore >= 70 ? 'bg-gradient-to-r from-green-400 to-emerald-500' :
-                          detectionResult.wellnessScore >= 40 ? 'bg-gradient-to-r from-yellow-400 to-amber-500' :
-                          'bg-gradient-to-r from-orange-400 to-red-500'
-                        }`}
-                        style={{ width: `${detectionResult.wellnessScore}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* All emotion scores */}
-                  <div className="mt-4 grid grid-cols-4 gap-2">
-                    {Object.entries(detectionResult.scores)
-                      .sort(([,a], [,b]) => b - a)
-                      .slice(0, 4)
-                      .map(([emotion, score]) => {
-                        const info = EMOTION_DISPLAY[emotion];
-                        return (
-                          <div key={emotion} className="bg-white/60 rounded-lg p-2 text-center">
-                            <span className="text-lg">{info?.emoji || '❓'}</span>
-                            <p className="text-xs text-gray-600 font-medium mt-0.5">{Math.round(score * 100)}%</p>
-                          </div>
-                        );
-                      })}
-                  </div>
-                </div>
-              </div>
-
-              {/* Processing time badge */}
-              <div className="flex justify-center">
-                <span className="text-xs text-gray-400 bg-gray-100 px-3 py-1 rounded-full">
-                  Processed in {Math.round(detectionResult.processingTimeMs)}ms
-                </span>
-              </div>
-
-              {/* Medicine relation (if they have medications) */}
-              {allMedications.length > 0 && (
-                <div>
-                  <p className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                    <Pill className="w-4 h-4 text-purple-500" />
-                    Is this related to any medicine?
-                  </p>
-                  <div className="space-y-1.5">
-                    {allMedications.map((med, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => setSelectedMedicine(selectedMedicine?.drugName === med.drugName ? null : med)}
-                        className={`w-full text-left p-3 rounded-xl border-2 transition-all duration-200 flex items-center gap-3 ${
-                          selectedMedicine?.drugName === med.drugName
-                            ? 'border-purple-500 bg-purple-50 shadow-sm'
-                            : 'border-gray-200 hover:border-purple-300 hover:bg-purple-50/50'
-                        }`}
-                      >
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                          selectedMedicine?.drugName === med.drugName ? 'bg-purple-500' : 'bg-purple-100'
-                        }`}>
-                          <Pill className={`w-4 h-4 ${
-                            selectedMedicine?.drugName === med.drugName ? 'text-white' : 'text-purple-600'
-                          }`} />
-                        </div>
-                        <div>
-                          <p className="font-medium text-gray-800 text-sm">{med.drugName}</p>
-                          <p className="text-xs text-gray-500">{med.dosage} • {med.frequency}</p>
-                        </div>
-                        {selectedMedicine?.drugName === med.drugName && (
-                          <span className="ml-auto text-purple-600 text-xs font-medium">Selected</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Note */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Note for caretaker (optional)
-                </label>
-                <textarea
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  placeholder="e.g., Feeling this way since morning..."
-                  rows={2}
-                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl resize-none text-sm
-                    focus:border-purple-400 focus:ring-2 focus:ring-purple-100 focus:outline-none transition-colors"
-                  maxLength={300}
-                />
-              </div>
-
-              {error && (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                  {error}
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={handleRetake}
-                  className="py-3.5 border-2 border-gray-300 text-gray-700 rounded-xl font-medium text-sm
-                    active:scale-95 transition-all hover:bg-gray-50 flex items-center justify-center gap-2"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Retake
-                </button>
-                <button
-                  onClick={handleSubmit}
-                  className="py-3.5 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-xl font-semibold text-sm
-                    active:scale-95 transition-all hover:shadow-lg hover:shadow-purple-200 flex items-center justify-center gap-2"
-                >
-                  <Send className="w-4 h-4" />
-                  Send to Caretaker
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ── Submitting ── */}
-          {step === 'submitting' && (
-            <div className="p-10 flex flex-col items-center justify-center text-center">
-              <div className="relative">
-                <div className="w-20 h-20 rounded-full bg-purple-100 flex items-center justify-center mb-4 animate-pulse">
-                  <Loader2 className="w-10 h-10 text-purple-600 animate-spin" />
-                </div>
-                <div className="absolute -inset-2 rounded-full border-2 border-purple-200 animate-ping opacity-30" />
-              </div>
-              <p className="font-semibold text-gray-800 text-lg">Sending...</p>
-              <p className="text-sm text-gray-500 mt-1">Notifying your caretaker</p>
-            </div>
-          )}
-
-          {/* ── Success ── */}
-          {step === 'success' && emotionInfo && detectionResult && (
-            <div className="p-10 flex flex-col items-center justify-center text-center">
-              <div className="relative mb-4">
-                <div className="w-20 h-20 rounded-full bg-green-100 flex items-center justify-center">
-                  <CheckCircle2 className="w-12 h-12 text-green-600" />
-                </div>
-                <div className="absolute -inset-1 rounded-full border-2 border-green-300 animate-ping opacity-20" />
-              </div>
-              <span className="text-5xl mb-3">{emotionInfo.emoji}</span>
-              <p className="font-bold text-gray-800 text-lg">Sent to Caretaker!</p>
-              <p className="text-sm text-gray-500 mt-1">
-                Your caretaker has been notified that you're feeling <strong>{emotionInfo.label}</strong>
-              </p>
-              <div className="mt-4 flex items-center gap-3">
-                <div className="px-4 py-2 bg-purple-50 rounded-lg border border-purple-200">
-                  <p className="text-xs text-purple-700">
-                    Wellness: <span className="font-bold text-lg">{detectionResult.wellnessScore}</span>/100
-                  </p>
-                </div>
-                {selectedMedicine && (
-                  <div className="px-4 py-2 bg-indigo-50 rounded-lg border border-indigo-200">
-                    <p className="text-xs text-indigo-700">
-                      <Pill className="w-3 h-3 inline mr-1" />
-                      {selectedMedicine.drugName}
-                    </p>
+                ) : (
+                  <div className="relative" style={{aspectRatio:cameraAspect}}>
+                    <video ref={videoRef} autoPlay playsInline muted onLoadedData={() => {setCameraReady(true);if(videoRef.current?.videoWidth)setCameraAspect(videoRef.current.videoWidth/videoRef.current.videoHeight);}} className="h-full w-full object-contain" style={{ transform:'scaleX(-1)' }} />
+                    <FaceOverlay frame={freshLiveFrame} mirror points={points} />
+                    <div className="absolute left-3 top-3 max-w-[calc(100%-1.5rem)] flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/75 px-3 py-1.5 text-xs font-semibold text-white"><span className={'h-1.5 w-1.5 shrink-0 rounded-full '+(cameraEnabled&&liveStatus==='running'&&!staleLiveFrame?'bg-emerald-400':'bg-amber-400')} />{cameraEnabled ? liveStatus === 'loading' ? t.modelLoading : liveStatus==='unavailable'?t.liveError:staleLiveFrame?t.waitingFresh:t.live : t.paused}</div>
+                    {!cameraReady && <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-900/85 px-6 text-center text-sm text-white">
+                      {cameraError ? <Camera className="h-9 w-9 text-teal-200" /> : <Loader2 className="h-8 w-8 animate-spin" />}
+                      <p>{!cameraEnabled ? t.paused : cameraError ? t.errors.camera : t.cameraHint}</p>
+                    </div>}
                   </div>
                 )}
+                {!photo&&<LiveResultStrip frame={freshLiveFrame} language={language} active={cameraEnabled&&cameraReady&&liveStatus==='running'} loading={liveStatus==='loading'&&cameraEnabled} stale={staleLiveFrame} fps={freshLiveFrame?.fps}/>}
               </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                {!photo && <button onClick={() => {if(cameraEnabled){stopCamera();setCameraReady(false);setLiveFrame(null);}setCameraEnabled(!cameraEnabled);}} className="font-semibold text-teal-700">{cameraEnabled?t.stopCamera:t.startCamera}</button>}
+                <label className="flex items-center gap-2"><input type="checkbox" checked={points} onChange={e=>setPoints(e.target.checked)} className="accent-teal-700" />{t.showLandmarks}</label>
+                {!photo && <label className="flex items-center gap-2">{t.detectorMode}<select value={detector} onChange={e=>setDetector(e.target.value as 'tiny'|'ssd')} className="max-w-36 rounded-lg bg-slate-50 p-2"><option value="tiny">{t.balanced}</option><option value="ssd">{t.enhanced}</option></select></label>}
+              </div>
+              <input ref={fileRef} type="file" accept="image/jpeg,image/png" onChange={handleUpload} className="hidden" aria-label={t.upload} />
+              <div className="grid grid-cols-2 gap-2">
+                {photo ? <>
+                  <button onClick={handleAnalyze} disabled={busy || !!report || !cloudAllowed} className={primary}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}{busy ? t.analyzing : t.cloudPhoto}</button>
+                  <button onClick={handleRetake} className={secondary}><RefreshCw className="h-4 w-4" />{t.retake}</button>
+                </> : <>
+                  <button onClick={handleCapture} disabled={!cameraReady || busy} className={primary}><Camera className="h-4 w-4" />{t.capture}</button>
+                  <button onClick={() => fileRef.current?.click()} disabled={busy} className={secondary}><Upload className="h-4 w-4" />{t.upload}</button>
+                </>}
+              </div>
+              {cameraError && !photo && <button onClick={startCamera} className="w-full text-sm font-medium text-teal-700">{t.retake}</button>}
+              <p className="text-xs leading-relaxed text-slate-500">{photo?t.consent:t.qualityHint}</p>
+              <FaceQualityPanel frame={photo?localPhotoFrame:liveFrame} language={language} fps={photo?undefined:liveFrame?.fps} backend={photo?undefined:liveBackend.current} photo={!!photo} now={now}/>
+              <FaceCareHelpPanel key={currentUid+':'+resident.residentId} residentId={resident.residentId} residentName={resident.name} language={language}/>
+              {!photo && <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <label className="flex items-center gap-3 text-sm font-bold text-slate-800"><input type="checkbox" checked={cloudAssist} disabled={!cloudAllowed} onChange={e=>{setCloudAssist(e.target.checked&&cloudAllowed);setError('');}} className="h-4 w-4 accent-teal-700 disabled:opacity-40" />{t.cloudAssist}</label>
+                <p className="mt-2 text-xs leading-relaxed text-slate-500">{t.cloudConsent}</p>
+              </div>}
+              <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-600">
+                <p className="font-semibold text-slate-800">{providerCopy.title}</p>
+                <p role="status" className="mt-1">{providerCopy.states[providerState]}</p>
+                {providerState!=='checking'&&<button onClick={()=>setProviderRetry(value=>value+1)} className="mt-2 inline-flex items-center gap-1.5 font-semibold text-teal-700"><RefreshCw className="h-3.5 w-3.5"/>{t.retry}</button>}
+              </div>
+              {error && <div role="alert" className="flex items-start gap-2 rounded-xl bg-amber-50 p-3 text-sm text-amber-900"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{(t.errors as Record<string,string>)[error] || t.errors.FACE_UNAVAILABLE}</div>}
             </div>
-          )}
+            <div className="min-w-0 space-y-4">
+              <LiveFaceResults frame={photo?localPhotoFrame:freshLiveFrame} language={language} loading={liveStatus==='loading'} photo={!!photo} stale={!photo&&staleLiveFrame} fps={freshLiveFrame?.fps} active={!photo&&cameraEnabled} />
+              {!photo&&<button onClick={handleDownloadLive} disabled={!freshLiveFrame} className={secondary+' w-full'}><FileText className="h-4 w-4"/>{t.downloadReport}</button>}
+              {liveStatus==='unavailable' && <p role="status" className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">{t.modelUnavailable}</p>}
+              {photo && localPhotoFrame && !report && <button onClick={handleDownload} className={secondary+' w-full'}><FileText className="h-4 w-4" />{t.downloadReport}</button>}
+              <details open={!!report||!!cloudSample||cloudAssist} className="rounded-2xl border border-slate-200 bg-white p-4">
+                <summary className="mb-3 cursor-pointer text-sm font-bold text-slate-800">{t.cloudReport}</summary>
+                {report ? <>
+                  <div className={'mb-4 rounded-xl p-3 text-sm font-semibold ' + (report.status === 'ready' ? 'bg-teal-50 text-teal-800' : 'bg-amber-50 text-amber-900')}>{report.status === 'ready' ? t.ready : t.retakeNeeded}</div>
+                  <div className="mb-4 rounded-xl bg-slate-50 p-4"><span className="text-3xl font-bold text-teal-800">{report.faceCount}</span><span className="ml-2 text-sm text-slate-600">{t.faces}</span></div>
+                  {report.issues.length > 0 && <ul className="mb-4 space-y-2 text-sm text-amber-900">{report.issues.map(issue => <li key={issue}>• {t.issues[issue]}</li>)}</ul>}
+                  {report.faces.map((face, index) => <div key={index} className="mb-3 rounded-xl border border-slate-100 p-3">
+                    <p className="mb-3 text-sm font-semibold">{getCloudExpressionDisplay(face.signals,language).emoji} {getCloudExpressionDisplay(face.signals,language).label} · {getCloudExpressionDisplay(face.signals,language).valueText}</p>
+                    <div className="flex flex-wrap justify-between gap-2 text-sm"><strong>{t.face} {index+1}</strong><span>{t.confidence}: {(face.confidence*100).toFixed(1)}%</span></div>
+                    <div className="my-3 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-teal-600" style={{width:face.confidence*100+'%'}} /></div>
+                    <dl className="space-y-1 text-xs text-slate-600">
+                      <div className="flex justify-between"><dt>{t.quality.blur}</dt><dd>{t.likelihood[face.quality.blur]}</dd></div>
+                      <div className="flex justify-between"><dt>{t.quality.underExposure}</dt><dd>{t.likelihood[face.quality.underExposure]}</dd></div>
+                    </dl>
+                    <details className="mt-3 text-xs"><summary className="cursor-pointer font-medium text-teal-700">{t.signalsTitle}</summary><p className="my-2 text-slate-500">{t.signalsHelp}</p>
+                      <dl className="space-y-1">{(['joy','sorrow','anger','surprise'] as const).map(key => <div key={key} className="flex justify-between"><dt>{t.signals[key]}</dt><dd>{t.likelihood[face.signals[key]]}</dd></div>)}</dl>
+                    </details>
+                  </div>)}
+                  <p className="mb-3 text-xs text-slate-500">{t.confidenceHelp}</p>
+                  <p className="mb-4 text-xs text-slate-500">Google Cloud Vision · {new Date(report.analyzedAt).toLocaleString(language === 'ta' ? 'ta-LK' : language === 'si' ? 'si-LK' : 'en-GB')}</p>
+                  <button onClick={handleDownload} className={secondary+' w-full'}><FileText className="h-4 w-4" />{t.download}</button>
+                </> : cloudSample && !photo ? <>
+                  <p className="mb-3 text-xs text-slate-500">{t.cloudLastChecked}: {new Date(cloudSample.report.analyzedAt).toLocaleTimeString(language)}</p>
+                  <div className="relative mb-3 overflow-hidden rounded-xl" style={{aspectRatio:cloudSample.photo.width+'/'+cloudSample.photo.height}}><img alt={t.sampledPreview} src={cloudSample.photo.dataUrl} className="h-full w-full" />{cloudSample.report.faces.map((face,index)=><div key={index} className="absolute rounded border-2 border-teal-300" style={{left:face.box.x*100+'%',top:face.box.y*100+'%',width:face.box.width*100+'%',height:face.box.height*100+'%'}} />)}</div>
+                  {cloudSample.report.faces.map((face,index)=>{const expression=getCloudExpressionDisplay(face.signals,language);return <p key={index} className="mb-2 text-sm text-slate-700">{t.face} {index+1} · {expression.emoji} {expression.label} · {expression.valueText}</p>;})}
+                  <p className="text-xs text-slate-500">{t.likelihoodHelp}</p>
+                </> : <p className="text-sm leading-relaxed text-slate-500">{busy ? t.analyzing : t.cloudWaiting}</p>}
+              </details>
+              <p className="rounded-xl bg-slate-50 p-4 text-xs leading-relaxed text-slate-600">{t.localPrivacy} {t.trackingHelp} {t.limitations}</p>
+            </div>
+          </div>
+          <ExperimentalWellnessReview key={resident.residentId + ':' + currentUid} resident={resident} frame={photo ? localPhotoFrame : freshLiveFrame} captured={!!photo} onSaved={onLogged} />
+          <details className="mt-6 rounded-2xl border border-teal-100 bg-teal-50/40 p-4 sm:p-5">
+            <summary className="cursor-pointer font-bold text-teal-900">{t.selfReportTitle}</summary>
+            <p className="my-3 text-sm text-slate-600">{t.selfReportHelp}</p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="text-sm text-slate-700">{t.feeling}
+                <select disabled={saving} value={feeling} onChange={event => changeCheckIn(() => setFeeling(event.target.value))} className="mt-1 block w-full rounded-xl border border-slate-200 bg-white p-3">
+                  <option value="">—</option>{feelings.map(item => <option key={item} value={item}>{t.feelings[item]}</option>)}
+                </select>
+              </label>
+              <label className="text-sm text-slate-700">{t.medicine}
+                <select disabled={saving} value={medicine} onChange={event => changeCheckIn(() => setMedicine(event.target.value))} className="mt-1 block w-full rounded-xl border border-slate-200 bg-white p-3">
+                  <option value="">{t.noMedicine}</option>{resident.getAllMedications().map((item,index) => <option key={index} value={item.drugName}>{item.drugName}</option>)}
+                </select>
+              </label>
+            </div>
+            <label className="mt-4 block text-sm font-semibold text-slate-700">{t.score}: {score === null ? '—' : score+'/100'}
+              <input aria-label={t.score} type="range" min="0" max="100" step="1" value={score ?? 50} disabled={saving} onChange={event => changeCheckIn(() => setScore(Number(event.target.value)))} className="mt-3 w-full accent-teal-700" />
+            </label>
+            <div className="flex justify-between text-xs text-slate-500"><span>{t.scoreLow}</span><span>{t.scoreHigh}</span></div>
+            <div className="mt-3 flex justify-between gap-2">{[0,25,50,75,100].map(value => <button key={value} disabled={saving} aria-label={t.score+' '+value} aria-pressed={score === value} onClick={() => changeCheckIn(() => setScore(value))} className={'min-w-10 rounded-lg border px-2 py-2 text-sm font-semibold '+(score === value ? 'border-teal-700 bg-teal-700 text-white' : 'border-slate-200 bg-white text-slate-600')}>{value}</button>)}</div>
+            <label className="mt-4 block text-sm text-slate-700">{t.note}
+              <textarea disabled={saving} value={note} maxLength={4500} onChange={event => changeCheckIn(() => setNote(event.target.value))} placeholder={t.notePlaceholder} className="mt-1 block w-full rounded-xl border border-slate-200 p-3" rows={2} />
+            </label>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button onClick={handleSubmit} disabled={score === null || saving || saved} className={primary}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : saved ? <CheckCircle2 className="h-4 w-4" /> : <Send className="h-4 w-4" />}{saving ? t.saving : saved ? t.saved : t.save}</button>
+              <p className="flex-1 text-xs text-slate-500">{saved ? t.saved : t.saveHelp}</p>
+            </div>
+          </details>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

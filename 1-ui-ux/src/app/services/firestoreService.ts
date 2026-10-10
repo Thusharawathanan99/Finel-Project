@@ -17,6 +17,18 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 
+/** Server-written per-user change signals; authoritative clinical data stays in SQL. */
+export function subscribeToCareUpdates(userId: string, callback: () => void): Unsubscribe {
+  let previous: string | null = null;
+  return onSnapshot(doc(db, 'users', userId, 'care_updates', 'latest'), snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.data();
+    const revision = JSON.stringify(data);
+    if (previous !== null && revision !== previous) callback();
+    previous = revision;
+  }, error => { console.warn('[Firestore] Care updates unavailable:', error.code); });
+}
+
 // ──────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────
@@ -73,15 +85,32 @@ export function subscribeToAlerts(
     limit(50)
   );
 
-  return onSnapshot(q, (snapshot) => {
-    const alerts: RealtimeAlert[] = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    } as RealtimeAlert));
-    callback(alerts);
-  }, (error) => {
-    console.error('[Firestore] Alert subscription error:', error);
-  });
+  try {
+    return onSnapshot(q, (snapshot) => {
+      const alerts: RealtimeAlert[] = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      } as RealtimeAlert));
+      callback(alerts);
+    }, (error) => {
+      console.warn('[Firestore] Alert subscription with composite index failed, falling back to in-memory sort:', error.message);
+      // Fallback: single filter without composite index order, sorted in-memory
+      const fallbackQ = query(alertsRef, where('targetRoles', 'array-contains', role), limit(50));
+      return onSnapshot(fallbackQ, (snapshot) => {
+        const alerts: RealtimeAlert[] = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        } as RealtimeAlert));
+        alerts.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+        callback(alerts);
+      }, (fallbackError) => {
+        console.error('[Firestore] Fallback alert subscription failed:', fallbackError);
+      });
+    });
+  } catch (err) {
+    console.error('[Firestore] subscribeToAlerts error:', err);
+    return () => {};
+  }
 }
 
 /**

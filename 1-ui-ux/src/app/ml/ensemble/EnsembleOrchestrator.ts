@@ -17,18 +17,19 @@
  */
 
 import { Medication } from '../../models/Medication';
-import { parseMedications, ParsedMedication, extractEntities } from '../nlp/MedicationParser';
+import { parseMedications, ParsedMedication, extractEntities, extractPrescriptionMetadata } from '../nlp/MedicationParser';
 import { verifyPrescriptionWithGemini, isGeminiEnabled, GeminiMedicationResult } from '../nlp/geminiService';
 import { analyzePrescriptionWithDonut, isDonutEnabled, DonutMedicationResult } from '../nlp/donutService';
 import { findDrugMatch } from '../nlp/rxnormDictionary';
 import { modelAccuracyTracker } from './ModelAccuracyTracker';
+import { reconcileCandidates, CandidateSourceEvidence } from '../../../../../4-system-engine/api/routes/prescriptionSafety.js';
 
 const DONUT_TASK_TIMEOUT_MS = Number(
   import.meta.env.VITE_ENSEMBLE_DONUT_TIMEOUT_MS ||
   import.meta.env.VITE_DONUT_PREDICT_TIMEOUT_MS ||
-  180000
+  25000
 );
-const GEMINI_TASK_TIMEOUT_MS = Number(import.meta.env.VITE_ENSEMBLE_GEMINI_TIMEOUT_MS || 180000);
+const GEMINI_TASK_TIMEOUT_MS = Number(import.meta.env.VITE_ENSEMBLE_GEMINI_TIMEOUT_MS || 25000);
 const GEMINI_ATTACH_IMAGE_TEXT_THRESHOLD = Number(import.meta.env.VITE_GEMINI_ATTACH_IMAGE_TEXT_THRESHOLD || 200);
 
 function withTaskTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -57,14 +58,16 @@ export interface EnsembleMedication {
   medication: Medication;
   confidence: number;
   sources: ModelSource[];
-  sourceDetails: {
-    donut?: { confidence: number; raw?: string };
-    regex?: { confidence: number; drugClass?: string };
-    gemini?: { confidence: number; warnings?: string[] };
-  };
+  sourceDetails: Partial<Record<ModelSource, CandidateSourceEvidence>>;
+  reviewReasons?: string[];
+  conflictingFields?: string[];
 }
 
 export interface EnsembleResult {
+  predictionId: string;
+  patientName?: string;
+  doctorName?: string;
+  date?: string;
   medications: EnsembleMedication[];
   overallConfidence: number;
   sourcesUsed: ModelSource[];
@@ -88,6 +91,9 @@ interface CandidateMedication {
   normalizedName: string;
   dosage: string;
   frequency: string;
+  duration?: string;
+  instructions?: string;
+  needsReview?: boolean;
   confidence: number;
   source: ModelSource;
   extra?: Record<string, unknown>;
@@ -96,19 +102,6 @@ interface CandidateMedication {
 // ─────────────────────────────────────────────
 // Ensemble Weights
 // ─────────────────────────────────────────────
-
-const MODEL_WEIGHTS: Record<ModelSource, number> = {
-  donut: 0.40,   // Your custom model — strong for prescription-specific patterns
-  regex: 0.25,   // Fast and reliable for standard formats
-  gemini: 0.35,  // High intelligence but higher latency
-};
-
-// Confidence boosts when models agree
-const AGREEMENT_BONUS = {
-  3: 1.30,  // All 3 models agree → +30% confidence
-  2: 1.15,  // 2 models agree → +15% confidence
-  1: 1.00,  // Single source → no bonus
-};
 
 // ─────────────────────────────────────────────
 // Main Orchestrator
@@ -127,6 +120,7 @@ export async function runEnsemble(
   imageBase64?: string,
   donutPromise?: Promise<DonutMedicationResult | null>
 ): Promise<EnsembleResult> {
+  const trackerScopeToken = modelAccuracyTracker.getScopeToken();
   const startTime = performance.now();
   const sourcesUsed: ModelSource[] = [];
   const corrections: string[] = [];
@@ -162,9 +156,12 @@ export async function runEnsemble(
           const directCandidates = result.medications.map(m => ({
             drugName: m.drugName,
             normalizedName: normalizeDrugName(m.drugName),
-            dosage: m.dosage,
-            frequency: m.frequency,
+            dosage: m.dosage || 'Needs Review',
+            frequency: m.frequency || 'Needs Review',
+            duration: m.duration || 'As directed',
+            instructions: m.instructions || 'Follow doctor guidance',
             confidence: m.confidence,
+            needsReview: Boolean(m.needsReview || m.confidence < 0.65 || !m.dosage || !m.frequency),
             source: 'donut' as ModelSource,
           }));
 
@@ -183,6 +180,10 @@ export async function runEnsemble(
               normalizedName: normalizeDrugName(r.medication.drugName),
               dosage: r.medication.dosage,
               frequency: r.medication.frequency,
+              duration: r.medication.duration,
+              instructions: r.medication.instructions,
+              needsReview: r.medication.needsReview,
+              extra: { rawMatch: r.rawMatch },
               confidence: Math.max(0.45, Math.min(0.75, r.confidence * 0.9)),
               source: 'donut' as ModelSource,
             }));
@@ -196,8 +197,9 @@ export async function runEnsemble(
             return entities.drugs.map((drug, idx) => ({
               drugName: drug,
               normalizedName: normalizeDrugName(drug),
-              dosage: entities.dosages[idx] || entities.dosages[0] || '',
-              frequency: entities.frequencies[idx] || entities.frequencies[0] || 'as directed',
+              dosage: 'Needs Review',
+              frequency: 'Needs Review',
+              needsReview: true,
               confidence: 0.42,
               source: 'donut' as ModelSource,
             }));
@@ -229,9 +231,12 @@ export async function runEnsemble(
           normalizedName: normalizeDrugName(r.medication.drugName),
           dosage: r.medication.dosage,
           frequency: r.medication.frequency,
+          duration: r.medication.duration || 'As directed',
+          instructions: r.medication.instructions || 'Follow doctor guidance',
           confidence: r.confidence,
+          needsReview: r.medication.needsReview,
           source: 'regex' as ModelSource,
-          extra: { drugClass: r.matchedDrugClass },
+          extra: { drugClass: r.matchedDrugClass, rawMatch: r.rawMatch },
         }));
       } catch (error) {
         timings.regexMs = performance.now() - t0;
@@ -276,7 +281,10 @@ export async function runEnsemble(
             normalizedName: normalizeDrugName(m.drugName),
             dosage: m.dosage,
             frequency: m.frequency,
+            duration: m.duration || 'As directed',
+            instructions: m.instructions || 'Follow doctor guidance',
             confidence: m.confidence,
+            needsReview: m.needsReview,
             source: 'gemini' as ModelSource,
             extra: { warnings: m.warnings, route: m.route },
           }));
@@ -411,7 +419,7 @@ export async function runEnsemble(
   timings.totalMs = performance.now() - startTime;
 
   // Track per-model performance
-  modelAccuracyTracker.recordPrediction(mergedMedications);
+  const predictionId = modelAccuracyTracker.recordPrediction(mergedMedications, trackerScopeToken, Object.keys(rawOutputs) as ModelSource[]);
 
   console.log(
     `[Ensemble] ✅ Complete: ${mergedMedications.length} medications, ` +
@@ -422,7 +430,22 @@ export async function runEnsemble(
     `gemini: ${timings.geminiMs ? Math.round(timings.geminiMs) + 'ms' : 'n/a'})`
   );
 
+  const metadata = extractPrescriptionMetadata(rawOutputs.gemini?.rawText || rawOutputs.donut?.raw_text || extractedText);
+  const patientName = rawOutputs.gemini?.patientName && rawOutputs.gemini.patientName !== 'Needs Review'
+    ? rawOutputs.gemini.patientName
+    : metadata.patientName;
+  const doctorName = rawOutputs.gemini?.doctorName && rawOutputs.gemini.doctorName !== 'Needs Review'
+    ? rawOutputs.gemini.doctorName
+    : metadata.doctorName;
+  const date = rawOutputs.gemini?.date && rawOutputs.gemini.date !== 'Needs Review'
+    ? rawOutputs.gemini.date
+    : metadata.date;
+
   return {
+    predictionId,
+    patientName,
+    doctorName,
+    date,
     medications: mergedMedications,
     overallConfidence,
     sourcesUsed,
@@ -441,131 +464,27 @@ export async function runEnsemble(
  * Merge candidates from all models using weighted confidence voting.
  * Groups by normalized drug name and combines evidence.
  */
-function mergeCandidates(candidates: CandidateMedication[]): EnsembleMedication[] {
-  const groups = new Map<string, CandidateMedication[]>();
 
-  // Group by normalized drug name (fuzzy matching)
-  for (const candidate of candidates) {
-    let matched = false;
-
-    for (const [key, group] of groups) {
-      if (isSameDrug(candidate.normalizedName, key)) {
-        group.push(candidate);
-        matched = true;
-        break;
-      }
-    }
-
-    if (!matched) {
-      groups.set(candidate.normalizedName, [candidate]);
-    }
-  }
-
-  // Vote within each group
-  const results: EnsembleMedication[] = [];
-
-  for (const group of groups.values()) {
-    const sources = [...new Set(group.map(c => c.source))];
-
-    // Pick the best drug name (prefer RxNorm-matched names)
-    const bestCandidate = pickBestCandidate(group);
-
-    // Combine confidence using weighted voting
-    let weightedConfidence = 0;
-    let totalWeight = 0;
-    const sourceDetails: EnsembleMedication['sourceDetails'] = {};
-
-    for (const candidate of group) {
-      const weight = MODEL_WEIGHTS[candidate.source];
-      weightedConfidence += candidate.confidence * weight;
-      totalWeight += weight;
-
-      // Build source details
-      if (candidate.source === 'donut') {
-        sourceDetails.donut = { confidence: candidate.confidence };
-      } else if (candidate.source === 'regex') {
-        sourceDetails.regex = {
-          confidence: candidate.confidence,
-          drugClass: candidate.extra?.drugClass as string | undefined,
-        };
-      } else if (candidate.source === 'gemini') {
-        sourceDetails.gemini = {
-          confidence: candidate.confidence,
-          warnings: candidate.extra?.warnings as string[] | undefined,
-        };
-      }
-    }
-
-    // Normalize weighted confidence
-    const baseConfidence = totalWeight > 0 ? weightedConfidence / totalWeight : 0;
-
-    // Apply agreement bonus
-    const agreementBonus = AGREEMENT_BONUS[Math.min(sources.length, 3) as 1 | 2 | 3];
-    const finalConfidence = Math.min(0.99, baseConfidence * agreementBonus);
-
-    results.push({
-      medication: new Medication(
-        bestCandidate.drugName,
-        bestCandidate.dosage,
-        bestCandidate.frequency
-      ),
-      confidence: finalConfidence,
-      sources,
-      sourceDetails,
-    });
-  }
-
-  // Sort by confidence (highest first)
-  results.sort((a, b) => b.confidence - a.confidence);
-
-  // Filter out extremely low-confidence noise (< 20%), but keep everything else.
-  // We apply a stricter filter for uncorroborated Donut-only results, since its fallback regex often hallucinates.
-  return results.filter(r => {
-    if (r.confidence < 0.20) return false;
-    
-    // Discard very-low-confidence candidates that ONLY came from Donut (hallucinations)
-    if (r.confidence < 0.25 && r.sources.length === 1 && r.sources[0] === 'donut') {
-      return false;
-    }
-    
-    return true;
-  });
+// Clinical agreement must include the regimen, not just the medicine name.
+export function mergeCandidates(candidates: CandidateMedication[]): EnsembleMedication[] {
+  return reconcileCandidates(candidates, name => {
+    const match = findDrugMatch(name);
+    return match && match.confidence > 0.8 ? match.drug.name : name;
+  }).map(result => ({
+    medication: Object.assign(new Medication(result.drugName, result.dosage, result.frequency,
+      undefined, result.duration, result.instructions, result.confidence, result.needsReview), {
+        reviewReasons: result.reviewReasons,
+        conflictingFields: result.conflictingFields,
+        sourceDetails: result.sourceDetails,
+      }),
+    confidence: result.confidence,
+    sources: result.sources,
+    sourceDetails: result.sourceDetails,
+    reviewReasons: result.reviewReasons,
+    conflictingFields: result.conflictingFields,
+  }));
 }
 
-/**
- * Pick the best candidate from a group of matches for the same drug.
- * Prefers: RxNorm-matched name > longer name > higher confidence.
- */
-function pickBestCandidate(group: CandidateMedication[]): CandidateMedication {
-  // Try to find a RxNorm-matched version
-  for (const c of group) {
-    const match = findDrugMatch(c.drugName);
-    if (match && match.confidence > 0.8) {
-      return {
-        ...c,
-        drugName: match.drug.name, // Use canonical RxNorm name
-      };
-    }
-  }
-
-  // Prefer Gemini's name (usually most accurate), then Donut, then regex
-  const priority: ModelSource[] = ['gemini', 'donut', 'regex'];
-  for (const source of priority) {
-    const candidate = group.find(c => c.source === source);
-    if (candidate) return candidate;
-  }
-
-  // Fallback: highest confidence
-  return group.sort((a, b) => b.confidence - a.confidence)[0];
-}
-
-// ─────────────────────────────────────────────
-// Utilities
-// ─────────────────────────────────────────────
-
-/**
- * Normalize a drug name for comparison.
- */
 function normalizeDrugName(name: string): string {
   return name
     .toLowerCase()
@@ -573,41 +492,3 @@ function normalizeDrugName(name: string): string {
     .trim();
 }
 
-/**
- * Check if two normalized drug names refer to the same medication.
- * Uses Levenshtein distance for fuzzy matching.
- */
-function isSameDrug(a: string, b: string): boolean {
-  if (a === b) return true;
-
-  // One is a substring of the other
-  if (a.includes(b) || b.includes(a)) return true;
-
-  // Levenshtein distance ≤ 2 for similar names
-  const maxLen = Math.max(a.length, b.length);
-  if (maxLen <= 3) return a === b;
-
-  const distance = levenshtein(a, b);
-  return distance <= 2;
-}
-
-/**
- * Simple Levenshtein distance.
- */
-function levenshtein(a: string, b: string): number {
-  const matrix: number[][] = [];
-  for (let i = 0; i <= a.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
-
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      );
-    }
-  }
-  return matrix[a.length][b.length];
-}

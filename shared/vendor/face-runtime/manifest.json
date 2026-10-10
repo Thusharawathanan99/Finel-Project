@@ -1,0 +1,38 @@
+{
+  "sdk": "@vladmandic/face-api",
+  "sdkVersion": "1.7.15",
+  "tensorflowVersion": "4.22.0",
+  "binariesPackage": "@tensorflow/tfjs-backend-wasm",
+  "files": [
+    {
+      "name": "face-api-1.7.15.js",
+      "bytes": 1333943,
+      "sha256": "0160f7af3a8c78cece45c7ecc765383bad74becfd438bb787cdd627b2d6f2cf6"
+    },
+    {
+      "name": "FACE_API_LICENSE",
+      "bytes": 1067,
+      "sha256": "9a3442b79acaf4fbc7c2e07b7e2d8f84af9bb3871bf08a69d80304ab00640e9a"
+    },
+    {
+      "name": "TENSORFLOW_LICENSE",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "name": "tfjs-backend-wasm.wasm",
+      "bytes": 311123,
+      "sha256": "70a5d516060464e5269f01c74bac1772d6b8ab6cb612acf16b5cdaf61f78d892"
+    },
+    {
+      "name": "tfjs-backend-wasm-simd.wasm",
+      "bytes": 424594,
+      "sha256": "77ebb28a6d34f371dbbf2086b7f2de8994acd8ea5a3cf1fa24d2c26c840cac7b"
+    },
+    {
+      "name": "MODEL_LICENSE",
+      "bytes": 1072,
+      "sha256": "d5480b4d4e46880107a56db666697ec3e90def81a8fc829e530b1c291e3172a5"
+    }
+  ]
+}

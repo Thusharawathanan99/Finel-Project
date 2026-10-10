@@ -1,21 +1,39 @@
-import { initializeApp } from 'firebase/app';
-import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeAuth, getAuth, getReactNativePersistence } from 'firebase/auth';
+import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// TODO: Replace with your Firebase config object
+// Firebase config object
 const firebaseConfig = {
-  apiKey: "AIzaSyDogCfoI28FaRJ-8_IcxNaJ5FrocaX7H6Q",
-  authDomain: "pescription.firebaseapp.com",
-  projectId: "pescription",
-  storageBucket: "pescription.firebasestorage.app",
-  messagingSenderId: "874959405712",
-  appId: "1:874959405712:web:795c54330532e4d3f68e15"
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID
 };
 
+const missingConfig = Object.entries(firebaseConfig)
+  .filter(([, value]) => typeof value !== 'string' || !value.trim())
+  .map(([key]) => key);
+if (missingConfig.length) {
+  throw new Error(`Missing Firebase configuration: ${missingConfig.join(', ')}. Set the EXPO_PUBLIC_FIREBASE_* variables.`);
+}
+
 // Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = initializeAuth(app, {
-  persistence: getReactNativePersistence(AsyncStorage)
-});
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+let auth;
+if (Platform.OS === 'web') {
+  auth = getAuth(app);
+} else {
+  try {
+    auth = initializeAuth(app, {
+      persistence: typeof getReactNativePersistence === 'function' ? getReactNativePersistence(AsyncStorage) : undefined
+    });
+  } catch (_e) {
+    auth = getAuth(app);
+  }
+}
 
 export { auth };

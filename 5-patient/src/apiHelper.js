@@ -1,66 +1,59 @@
-/**
- * Shared API helper for the Patient app.
- * Centralizes auth-token fetching, resident ID lookup, and base URL.
- */
 import { auth } from './firebase/config';
 
-export const API_BASE = 'https://api.careconnect.website/api';
+const configuredApiUrl = typeof process !== 'undefined' ? process.env.EXPO_PUBLIC_API_URL?.trim() : '';
+export const API_BASE = configuredApiUrl ? configuredApiUrl.replace(/\/+$/, '') : '';
 
-/**
- * Make an authenticated fetch request to the backend.
- */
+export function getApiBase() {
+  if (!API_BASE) throw new Error('The mobile API URL is not configured. Set EXPO_PUBLIC_API_URL in the app .env file.');
+  return API_BASE;
+}
+
 export async function apiFetch(path, options = {}) {
   const user = auth.currentUser;
   if (!user) throw new Error('Not authenticated');
-
+  const apiBase = getApiBase();
   const token = await user.getIdToken();
-  const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
-
-  const res = await fetch(url, {
+  if (auth.currentUser?.uid !== user.uid) throw new Error('Your session changed. Please try again.');
+  const response = await fetch(apiBase + path, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
       ...(options.headers || {}),
+      Authorization: `Bearer ${token}`,
     },
   });
-
-  return res;
+  if (auth.currentUser?.uid !== user.uid) throw new Error('Your session changed. Please try again.');
+  const readJson = response.json.bind(response);
+  response.json = async () => {
+    if (auth.currentUser?.uid !== user.uid) throw new Error('Your session changed. Please try again.');
+    const data = await readJson();
+    if (auth.currentUser?.uid !== user.uid) throw new Error('Your session changed. Please try again.');
+    return data;
+  };
+  return response;
 }
 
-/**
- * Get the current user's resident_id from the backend users table.
- * Falls back to generating one from the Firebase UID.
- */
-let _cachedResidentId = null;
+let cachedResident = null;
 
 export async function getResidentId() {
-  if (_cachedResidentId) return _cachedResidentId;
-
   const user = auth.currentUser;
   if (!user) throw new Error('Not authenticated');
-
-  try {
-    const res = await apiFetch(`/users/${user.uid}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.resident_id) {
-        _cachedResidentId = data.resident_id;
-        return _cachedResidentId;
-      }
-    }
-  } catch (e) {
-    console.warn('[apiHelper] Could not fetch user profile:', e.message);
+  if (cachedResident?.uid === user.uid) return cachedResident.residentId;
+  const response = await apiFetch(`/users/${encodeURIComponent(user.uid)}`);
+  if (!response.ok) {
+    throw new Error(response.status === 404
+      ? 'Your patient profile is missing. Please sign in again to complete setup.'
+      : 'Your patient profile could not be loaded. Please try again.');
   }
-
-  // Fallback
-  _cachedResidentId = `R-${user.uid.slice(0, 8).toUpperCase()}`;
-  return _cachedResidentId;
+  const profile = await response.json();
+  if (auth.currentUser?.uid !== user.uid) throw new Error('Your session changed. Please try again.');
+  if (profile.role !== 'patient' || !profile.resident_id) {
+    throw new Error('Your account is not linked to a patient profile. Please contact your care team.');
+  }
+  cachedResident = { uid: user.uid, residentId: profile.resident_id };
+  return profile.resident_id;
 }
 
-/**
- * Clear cached resident ID (e.g. on logout).
- */
 export function clearCache() {
-  _cachedResidentId = null;
+  cachedResident = null;
 }

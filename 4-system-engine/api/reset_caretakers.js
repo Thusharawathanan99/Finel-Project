@@ -146,7 +146,7 @@ async function initializeFirebaseAdmin() {
   }
 
   admin.initializeApp({
-    projectId: process.env.VITE_FIREBASE_PROJECT_ID || 'pescription',
+    projectId: process.env.FIREBASE_PROJECT_ID,
   });
 
   return admin;
@@ -232,7 +232,7 @@ async function cleanupFirebaseCaretakers(snapshot, dryRun) {
   }
 }
 
-async function resetCaretakers({ dryRun, withFirebase }) {
+export async function resetCaretakers({ dryRun, withFirebase }) {
   const connection = await pool.getConnection();
   let identitySnapshot = {
     uids: [],
@@ -243,14 +243,18 @@ async function resetCaretakers({ dryRun, withFirebase }) {
   let dbStepSucceeded = false;
 
   try {
-    await connection.beginTransaction();
-
-    const addedColumns = await ensureCaretakerColumns(connection);
-    if (addedColumns.length > 0) {
+    // ALTER TABLE commits implicitly in MySQL. Skip it entirely for previews,
+    // and finish schema preparation before the destructive transaction begins.
+    const addedColumns = dryRun ? [] : await ensureCaretakerColumns(connection);
+    if (dryRun) {
+      console.log('Dry run: schema changes were skipped.');
+    } else if (addedColumns.length > 0) {
       console.log(`Added missing caretaker columns: ${addedColumns.join(', ')}`);
     } else {
       console.log('Caretaker columns already up to date.');
     }
+
+    await connection.beginTransaction();
 
     identitySnapshot = await getCaretakerIdentitySnapshot(connection);
     if (withFirebase) {
@@ -306,14 +310,18 @@ async function resetCaretakers({ dryRun, withFirebase }) {
   await pool.end();
 }
 
-const dryRun = process.argv.includes('--dry-run');
-const confirm = process.argv.includes('--confirm');
-const withFirebase = process.argv.includes('--with-firebase');
-
-if (!dryRun && !confirm) {
-  console.error('Refusing to run destructive reset without --confirm.');
-  console.error('Use --dry-run to preview or --confirm to execute.');
-  process.exit(1);
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  const dryRun = process.argv.includes('--dry-run');
+  const confirm = process.argv.includes('--confirm');
+  const withFirebase = process.argv.includes('--with-firebase');
+  if (!dryRun && !confirm) {
+    console.error('Refusing to run destructive reset without --confirm.');
+    console.error('Use --dry-run to preview or --confirm to execute.');
+    process.exitCode = 1;
+  } else {
+    resetCaretakers({ dryRun, withFirebase }).catch(error => {
+      console.error('Caretaker reset could not be completed:', error.message);
+      process.exitCode = 1;
+    });
+  }
 }
-
-resetCaretakers({ dryRun, withFirebase });

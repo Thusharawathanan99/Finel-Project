@@ -1,14 +1,19 @@
 // Appointments API routes
 import { Router } from 'express';
 import pool from '../db.js';
+import { randomUUID } from 'crypto';
+import { validDate, validText } from '../validation.js';
 
 const router = Router();
 
 // GET /api/appointments — List all appointments
-router.get('/', async (req, res) => {
+router.get(['/appointments', '/'], async (req, res) => {
   try {
+    const scope = req.user?.role === 'admin' ? null : (req.residentScope || []);
+    if (scope && !scope.length) return res.json([]);
+    const where = scope ? `WHERE resident_id IN (${scope.map(() => '?').join(',')})` : '';
     const [rows] = await pool.execute(
-      'SELECT * FROM appointments ORDER BY appointment_date DESC, appointment_time DESC'
+      `SELECT * FROM appointments ${where} ORDER BY appointment_date DESC, appointment_time DESC`, scope || []
     );
     res.json(rows);
   } catch (error) {
@@ -32,10 +37,16 @@ router.get('/residents/:residentId/appointments', async (req, res) => {
 });
 
 // POST /api/appointments — Create an appointment
-router.post('/', async (req, res) => {
+router.post(['/appointments', '/'], async (req, res) => {
   try {
     const { residentId, residentName, doctorName, specialization, appointmentDate, appointmentTime, reason } = req.body;
-    const appointmentId = `APT-${Date.now()}`;
+    if (!validText(residentId, 50) || !validDate(appointmentDate) ||
+        !validText(doctorName, 255) || !validText(residentName, 255, true) ||
+        !validText(specialization, 100, true) || !validText(reason, 5000, true) ||
+        (appointmentTime && !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(appointmentTime))) {
+      return res.status(400).json({ error: 'Provide a resident, doctor, valid calendar date and optional 24-hour time' });
+    }
+    const appointmentId = `APT-${randomUUID()}`;
 
     await pool.execute(
       `INSERT INTO appointments (appointment_id, resident_id, resident_name, doctor_name, specialization, appointment_date, appointment_time, reason)
@@ -67,9 +78,13 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/appointments/:id — Update appointment (reschedule, cancel, complete)
-router.put('/:id', async (req, res) => {
+router.put('/appointments/:id', async (req, res) => {
   try {
     const { status, appointmentDate, appointmentTime, notes } = req.body;
+    if ((status !== undefined && !['scheduled', 'completed', 'cancelled', 'rescheduled'].includes(status)) ||
+        (appointmentDate !== undefined && !validDate(appointmentDate)) ||
+        (appointmentTime !== undefined && !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(appointmentTime)) ||
+        !validText(notes, 5000, true)) return res.status(400).json({ error: 'Invalid appointment update' });
     const fields = [];
     const values = [];
 
@@ -93,7 +108,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // DELETE /api/appointments/:id
-router.delete('/:id', async (req, res) => {
+router.delete('/appointments/:id', async (req, res) => {
   try {
     await pool.execute('DELETE FROM appointments WHERE appointment_id = ?', [req.params.id]);
     res.json({ message: 'Appointment deleted' });

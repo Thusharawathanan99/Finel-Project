@@ -1,6 +1,6 @@
 /**
  * Vocal Tone Analysis Engine
- * Uses TensorFlow.js and the Web Audio API for vocal tone classification.
+ * Uses acoustic heuristics and the Web Audio API; scores are not clinical measurements.
  * Analyzes pitch, energy, and spectral features to determine emotional tone.
  */
 
@@ -12,6 +12,8 @@ export interface VocalToneResult {
   wellnessScore: number;
   features: AudioFeatures;
   processingTimeMs: number;
+  needsReview: boolean;
+  analysisKind: 'acoustic-heuristic';
 }
 
 export interface AudioFeatures {
@@ -63,11 +65,17 @@ export class VocalToneEngine {
     const channelData = audioBuffer.getChannelData(0);
     const sampleRate = audioBuffer.sampleRate;
 
+    if (!Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 192000 || channelData.length < Math.max(2048, sampleRate / 4) || channelData.some(value => !Number.isFinite(value))) throw new Error('Vocal analysis requires a valid recording with audible speech.');
+    const rms = Math.sqrt(channelData.reduce((sum, value) => sum + value * value, 0) / channelData.length);
+    if (rms < 0.003) throw new Error('No audible speech detected. Please record again.');
+
     // Extract audio features
     const features = this.extractFeatures(channelData, sampleRate);
 
     // Classify tone based on features
+    if (!Object.values(features).every(Number.isFinite) || features.pitchMean <= 0) throw new Error('No voiced speech was detected. Please record again.');
     const scores = this.classifyTone(features);
+    if (!Object.values(scores).every(Number.isFinite)) throw new Error('Vocal analysis is unavailable for this recording.');
 
     // Find dominant tone
     let dominant: VocalToneCategory = 'calm';
@@ -95,6 +103,8 @@ export class VocalToneEngine {
       wellnessScore,
       features,
       processingTimeMs,
+      needsReview: true,
+      analysisKind: 'acoustic-heuristic',
     };
   }
 
@@ -115,17 +125,25 @@ export class VocalToneEngine {
    */
   async recordAndAnalyze(durationMs: number = 5000): Promise<VocalToneResult> {
     await this.initialize();
+    if (!Number.isFinite(durationMs) || durationMs < 250 || durationMs > 30000) throw new Error('Recording duration must be between 250ms and 30 seconds.');
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mediaRecorder = new MediaRecorder(stream);
     const chunks: Blob[] = [];
 
     return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      mediaRecorder.onerror = () => {
+        clearTimeout(timer);
+        stream.getTracks().forEach(t => t.stop());
+        reject(new Error('Audio recording failed. Please try again.'));
+      };
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunks.push(e.data);
       };
 
       mediaRecorder.onstop = async () => {
+        clearTimeout(timer);
         stream.getTracks().forEach(t => t.stop());
         try {
           const blob = new Blob(chunks, { type: 'audio/webm' });
@@ -139,7 +157,7 @@ export class VocalToneEngine {
       };
 
       mediaRecorder.start();
-      setTimeout(() => mediaRecorder.stop(), durationMs);
+      timer = setTimeout(() => { if (mediaRecorder.state !== 'inactive') mediaRecorder.stop(); }, durationMs);
     });
   }
 
@@ -149,7 +167,7 @@ export class VocalToneEngine {
   private extractFeatures(samples: Float32Array, sampleRate: number): AudioFeatures {
     const frameSize = 2048;
     const hopSize = 512;
-    const numFrames = Math.floor((samples.length - frameSize) / hopSize);
+    const numFrames = Math.max(0, 1 + Math.floor((samples.length - frameSize) / hopSize));
 
     // --- Pitch estimation via autocorrelation ---
     const pitches: number[] = [];

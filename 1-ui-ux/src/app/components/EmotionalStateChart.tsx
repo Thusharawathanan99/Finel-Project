@@ -16,26 +16,26 @@ export function EmotionalStateChart({ states }: EmotionalStateChartProps) {
     );
   }
 
-  const chartData = [...states]
-    .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+  const chronologicalStates = [...states].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+  const chartData = chronologicalStates
     .map(state => ({
       time: state.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       score: state.stateScore,
       level: state.getEmotionalLevel()
     }));
 
-  const latestState = states[states.length - 1];
+  const latestState = chronologicalStates[chronologicalStates.length - 1];
 
   return (
     <div className="space-y-4">
-      <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg p-4">
+      <div className="bg-gradient-to-r from-teal-50 to-purple-50 rounded-lg p-4">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-gray-600">Current Emotional State</p>
             <p className="text-2xl font-bold">{latestState.getEmotionalLevel()}</p>
           </div>
           <div className="text-right">
-            <p className="text-3xl font-bold text-blue-600">{latestState.stateScore}</p>
+            <p className="text-3xl font-bold text-teal-600">{latestState.stateScore}</p>
             <p className="text-xs text-gray-500">out of 100</p>
           </div>
         </div>
@@ -65,14 +65,14 @@ export function EmotionalStateChart({ states }: EmotionalStateChartProps) {
       </div>
 
       <div className="grid grid-cols-5 gap-2">
-        {states.slice(-5).reverse().map((state, idx) => (
+        {chronologicalStates.slice(-5).reverse().map((state, idx) => (
           <div key={idx} className="bg-white border rounded p-2 text-center">
             <p className="text-xs text-gray-500 mb-1">
               {state.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </p>
             <p className={`text-lg font-bold ${
               state.stateScore >= 80 ? 'text-green-600' :
-              state.stateScore >= 60 ? 'text-blue-600' :
+              state.stateScore >= 60 ? 'text-teal-600' :
               state.stateScore >= 40 ? 'text-yellow-600' :
               state.stateScore >= 20 ? 'text-orange-600' :
               'text-red-600'

@@ -1,0 +1,6 @@
+state/
+models/
+results/
+*.sqlite3*
+*.joblib
+.env

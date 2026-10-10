@@ -2,11 +2,21 @@
 .env
 .env.local
 .env.*.local
+**/serviceAccountKey.json
+**/*service-account*.json
+regression-results.log
 
 # Node modules
+.cache/
 node_modules/
 dist/
 build/
+.expo/
+.expo-audit-web/
+.metro-cache/
+run-logs/
+*.log
+audit.json
 
 # Python
 __pycache__/
@@ -64,3 +74,16 @@ Thumbs.db
 
 # User requested exclusions
 *.md
+!README.md
+!AUDIT_REPAIRS.md
+!PROPOSAL_COMPLETION_STATUS.md
+!7-monitoring/README.md
+!docs/research/**/*.md
+# Private edge event queues and deployment credentials.
+7-monitoring/state/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.task
+# Private local database snapshots, never commit patient data.
+.local-backups/

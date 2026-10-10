@@ -2,6 +2,10 @@ node_modules
 npm-debug.log
 .env
 .env.*
+serviceAccountKey.json
+*service-account*.json
+*.pem
+*.key
 *.md
 .git
 .gitignore

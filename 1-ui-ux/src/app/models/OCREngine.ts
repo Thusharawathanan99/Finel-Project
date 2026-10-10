@@ -60,7 +60,7 @@ export class OCREngine {
       } else if (isGeminiEnabled()) {
         console.log(`[OCREngine] CRNN not available — using Gemini Vision OCR`);
       } else {
-        console.warn(`[OCREngine] No OCR backend available. Set VITE_GEMINI_API_KEY in .env or start the Donut server`);
+        console.warn('[OCREngine] No OCR backend available. Configure server GEMINI_API_KEY or start the Donut server.');
       }
     }
   }
