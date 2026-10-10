@@ -1,6 +1,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { apiFetch } from '../apiHelper';
 import { auth } from '../firebase/config';
 import { useScreenRefresh } from '../useScreenRefresh';
@@ -24,7 +25,12 @@ export default function AlertsScreen({ navigation }) {
     catch(e){setError(e.message);}finally{lock.current=false;setBusy(null);}
   };
   return <SafeAreaView style={{flex:1,backgroundColor:'#F6F5FF'}}><ScrollView contentContainerStyle={{padding:22}}>
-    <Text style={{fontSize:26,fontWeight:'800',color:'#171459'}}>Care Alerts</Text>
+    <View style={{flexDirection:'row',alignItems:'center',marginBottom:12}}>
+      <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Dashboard')} style={{marginRight:12,padding:6}}>
+        <MaterialCommunityIcons name="arrow-left" size={24} color="#171459" />
+      </TouchableOpacity>
+      <Text style={{fontSize:26,fontWeight:'800',color:'#171459'}}>Care Alerts</Text>
+    </View>
     <Text style={{marginVertical:12,color:'#64748B'}}>Alerts for residents assigned to your care. Verify the resident's needs directly.</Text>
     {error?<Text accessibilityRole="alert" style={{color:'#991B1B'}}>{error}</Text>:null}<TouchableOpacity onPress={load}><Text style={{paddingVertical:12,color:'#6D38FF'}}>Refresh alerts</Text></TouchableOpacity>
     {loading?<ActivityIndicator/>:!error&&!wellness.length&&!emergencies.length?<Text>No active alerts.</Text>:null}

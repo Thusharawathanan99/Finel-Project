@@ -1,6 +1,10 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { signOut } from 'firebase/auth';
+import { auth } from '../firebase/config';
+import { unregisterPushNotifications } from '../pushNotifications';
 import { apiFetch, getResidentId } from '../apiHelper';
 import { useScreenRefresh } from '../useScreenRefresh';
 const fields = [['address','Street address'],['city','City'],['state','State'],['zipCode','ZIP code'],['emergencyContactName','Emergency contact name'],['emergencyContactPhone','Emergency contact phone'],['emergencyContactRelation','Emergency contact relation']];
@@ -31,7 +35,12 @@ export default function ProfileScreen({ navigation }) {
     }catch(e){setError(e.message);}finally{locked.current=false;setSaving(false);}
   };
   return <SafeAreaView style={{flex:1,backgroundColor:'#F6F5FF'}}><ScrollView contentContainerStyle={{padding:22}}>
-    <Text style={{fontSize:26,fontWeight:'800',color:'#171459'}}>My Profile</Text>
+    <View style={{flexDirection:'row',alignItems:'center',marginBottom:14}}>
+      <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Dashboard')} style={{marginRight:12,padding:6}}>
+        <MaterialCommunityIcons name="arrow-left" size={24} color="#171459" />
+      </TouchableOpacity>
+      <Text style={{fontSize:26,fontWeight:'800',color:'#171459'}}>My Profile</Text>
+    </View>
     {error?<Text accessibilityRole="alert" style={{color:'#991B1B',marginVertical:12}}>{error}</Text>:null}
     {!record?<TouchableOpacity onPress={load}><ActivityIndicator/><Text>Refresh profile</Text></TouchableOpacity>:<>
       <View style={{backgroundColor:'white',padding:18,borderRadius:18,marginVertical:16}}>
@@ -40,6 +49,25 @@ export default function ProfileScreen({ navigation }) {
       {fields.map(([key,label])=><View key={key} style={{marginBottom:14}}><Text style={{fontWeight:'700',marginBottom:6}}>{label}</Text>{draft?<TextInput accessibilityLabel={label} editable={!saving} maxLength={key==='address'?1000:255} keyboardType={key==='emergencyContactPhone'?'phone-pad':'default'} value={draft[key]} onChangeText={value=>{dirty.current=true;setDraft(current=>({...current,[key]:value}));}} style={{minHeight:48,borderWidth:1,borderColor:'#CBD5E1',borderRadius:10,padding:12,backgroundColor:'white'}}/>:<Text style={{fontSize:16}}>{record[columns[key]||key]||'Not recorded'}</Text>}</View>)}
       <TouchableOpacity disabled={saving} onPress={draft?save:edit} style={{padding:16,backgroundColor:'#6D38FF',borderRadius:12,alignItems:'center'}}><Text style={{color:'white',fontWeight:'700'}}>{saving?'Saving…':draft?'Save Info':'Edit Info'}</Text></TouchableOpacity>
       {draft?<TouchableOpacity disabled={saving} onPress={()=>{dirty.current=false;setDraft(null);setError('');}}><Text style={{padding:16,textAlign:'center'}}>Cancel edits</Text></TouchableOpacity>:null}
+      <TouchableOpacity
+        onPress={() => {
+          Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Sign Out',
+              style: 'destructive',
+              onPress: async () => {
+                await unregisterPushNotifications().catch(() => {});
+                await signOut(auth).catch(() => {});
+                navigation.replace('Login');
+              }
+            }
+          ]);
+        }}
+        style={{padding:16,borderWidth:1,borderColor:'#FCA5A5',backgroundColor:'#FEF2F2',borderRadius:12,alignItems:'center',marginTop:20}}
+      >
+        <Text style={{color:'#DC2626',fontWeight:'700'}}>Sign Out</Text>
+      </TouchableOpacity>
     </>}
   </ScrollView></SafeAreaView>;
 }

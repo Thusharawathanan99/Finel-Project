@@ -105,16 +105,15 @@ const DashboardScreen = ({ navigation }) => {
 
   const handleSOS = () => {
     if (!patients.length) {
-      confirmSOS(null);
+      Alert.alert('No Assigned Residents', 'You currently have no residents assigned to your care.');
       return;
     }
     setShowSosPicker(true);
   };
   const confirmSOS = patient => {
-    const title = patient ? 'Emergency for ' + patient.name : 'Emergency Panic SOS';
-    const msg = patient
-      ? 'This will alert the administrator with your name, resident location and recorded time. Send the emergency alert?'
-      : 'This will immediately broadcast an emergency alert with your caretaker details, location and timestamp to the administrator and team. Broadcast now?';
+    if (!patient) return;
+    const title = 'Emergency for ' + patient.name;
+    const msg = 'This will alert the administrator with your name, resident location and recorded time. Send the emergency alert?';
     Alert.alert(title, msg, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Send SOS', style: 'destructive', onPress: () => { setShowSosPicker(false); triggerSOS(patient); } }
@@ -122,10 +121,13 @@ const DashboardScreen = ({ navigation }) => {
   };
   const triggerSOS = async patient => {
     if (sosLock.current) return;
-    if (!patient?.id || !patients.some(assigned => assigned.id === patient.id)) { Alert.alert('Choose a Resident', 'Select a resident assigned to your care.'); return; }
+    if (!patient?.id || !patients.some(assigned => assigned.id === patient.id)) {
+      Alert.alert('Choose a Resident', 'Select a resident assigned to your care.');
+      return;
+    }
     sosLock.current = true; setSosSending(true);
     try {
-      const res = await apiFetch('/sos-alerts', { method: 'POST', body: JSON.stringify({ residentId: patient.id, message: 'Emergency SOS reported by caretaker ' + caretakerName }) });
+      const res = await apiFetch('/sos-alerts', { method: 'POST', body: JSON.stringify({ residentId: patient.id, message: 'Emergency SOS reported by caretaker ' + caretakerName + ' for ' + patient.name }) });
       if (!res.ok) throw new Error('Emergency could not be recorded');
       setSosSent(true); await fetchAlerts();
       Alert.alert('SOS Recorded', 'The emergency is visible to the care team. Call emergency services if immediate help is needed.');
@@ -441,13 +443,15 @@ const DashboardScreen = ({ navigation }) => {
         <View style={{flex:1,backgroundColor:'rgba(0,0,0,0.6)',justifyContent:'center',padding:24}}>
           <View style={{backgroundColor:'white',borderRadius:20,padding:20,maxHeight:'80%'}}>
             <Text style={{fontSize:20,fontWeight:'800',color:'#171459',marginBottom:14}}>Emergency Help Request</Text>
-            <TouchableOpacity onPress={()=>confirmSOS(null)} style={{backgroundColor:'#FFE4E6',borderColor:'#FECDD3',borderWidth:1,borderRadius:12,padding:14,marginBottom:12,flexDirection:'row',alignItems:'center'}}>
-              <MaterialCommunityIcons name="broadcast" size={24} color="#E11D48" style={{marginRight:10}} />
-              <View style={{flex:1}}>
-                <Text style={{fontSize:16,fontWeight:'700',color:'#E11D48'}}>Broadcast Facility Panic SOS</Text>
-                <Text style={{fontSize:12,color:'#73758E',marginTop:2}}>Alerts admin immediately with your caretaker name & location</Text>
-              </View>
-            </TouchableOpacity>
+            {patients.length > 0 && (
+              <TouchableOpacity onPress={()=>confirmSOS(patients[0])} style={{backgroundColor:'#FFE4E6',borderColor:'#FECDD3',borderWidth:1,borderRadius:12,padding:14,marginBottom:12,flexDirection:'row',alignItems:'center'}}>
+                <MaterialCommunityIcons name="broadcast" size={24} color="#E11D48" style={{marginRight:10}} />
+                <View style={{flex:1}}>
+                  <Text style={{fontSize:16,fontWeight:'700',color:'#E11D48'}}>Broadcast Emergency Alert</Text>
+                  <Text style={{fontSize:12,color:'#73758E',marginTop:2}}>Alerts admin immediately with your caretaker name & assigned resident</Text>
+                </View>
+              </TouchableOpacity>
+            )}
             {patients.length > 0 && <Text style={{fontSize:14,fontWeight:'700',color:'#73758E',marginBottom:8,textTransform:'uppercase',letterSpacing:0.5}}>Or Select Specific Resident</Text>}
             <ScrollView style={{maxHeight:260}}>
               {patients.map(patient=>(

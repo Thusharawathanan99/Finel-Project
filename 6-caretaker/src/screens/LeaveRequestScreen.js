@@ -167,7 +167,7 @@ const LeaveRequestScreen = ({ navigation }) => {
       >
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.closeBtn}>
+          <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Dashboard')} style={styles.closeBtn}>
             <MaterialCommunityIcons name="arrow-left" size={22} color="#171459" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Leave Management</Text>

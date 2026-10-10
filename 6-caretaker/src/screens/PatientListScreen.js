@@ -65,7 +65,7 @@ const PatientListScreen = ({ navigation }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Dashboard')} style={styles.backBtn}>
           <MaterialCommunityIcons name="arrow-left" size={24} color="#171459" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>All Patients</Text>

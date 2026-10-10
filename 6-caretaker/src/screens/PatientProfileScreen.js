@@ -202,7 +202,7 @@ const PatientProfileScreen = ({ route, navigation }) => {
       
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('PatientList')} style={styles.backBtn}>
           <MaterialCommunityIcons name="arrow-left" size={24} color="#171459" />
         </TouchableOpacity>
         <View style={styles.headerTitleContainer}>
@@ -486,7 +486,7 @@ const PatientProfileScreen = ({ route, navigation }) => {
       </ScrollView>
 
       {/* Appointment Booking Modal */}
-      <Modal visible={showApptModal} animationType="slide" transparent>
+      <Modal visible={showApptModal} animationType="slide" transparent onRequestClose={() => { setShowApptModal(false); setSelectedDoctor(null); }}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
           <View style={{ backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '90%' }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -592,7 +592,7 @@ const PatientProfileScreen = ({ route, navigation }) => {
       </Modal>
 
       {/* Wellness Log Modal */}
-      <Modal visible={showWellnessLog} animationType="slide" transparent>
+      <Modal visible={showWellnessLog} animationType="slide" transparent onRequestClose={() => setShowWellnessLog(false)}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
           <View style={{ backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40, maxHeight: '85%' }}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>

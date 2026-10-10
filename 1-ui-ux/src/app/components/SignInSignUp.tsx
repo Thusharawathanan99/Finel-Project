@@ -133,6 +133,10 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
   const handlePasswordReset = async () => {
     setError('');
     setNotice('');
+    if (!formData.email.trim()) {
+      setError('Please enter your email address to receive a password reset link.');
+      return;
+    }
     setResettingPassword(true);
     try {
       await requestPasswordReset(formData.email);
@@ -154,6 +158,10 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
     setError('');
     setNotice('');
 
+    if (!formData.name.trim() || !formData.email.trim()) {
+      setError('Please fill in your name and email.');
+      return;
+    }
     if (formData.password !== formData.confirmPassword) {
       setError('Passwords do not match!');
       return;
@@ -179,14 +187,9 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
         formData.residentId || undefined
       );
 
-      const user: User = {
-        userId: appUser.uid,
-        name: appUser.name,
-        email: appUser.email,
-        role: appUser.role,
-        residentId: appUser.residentId,
-      };
-      await onComplete(user);
+      setNotice(`Account for ${appUser.name} created! Patient accounts are designed for the CareConnect Elder/Orphan Mobile App. Please sign in with an Administrator account here.`);
+      setMode('signin');
+      setFormData(prev => ({ ...prev, password: '', confirmPassword: '' }));
     } catch (err: any) {
       console.error('[SignUp] Error:', err);
       const code = err?.code || '';

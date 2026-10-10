@@ -591,7 +591,7 @@ const LiveEmotionScreen = ({ navigation }) => {
         }} />}
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
-          <TouchableOpacity accessibilityLabel={copy.back} style={styles.back} onPress={() => { cancelSession(); navigation.goBack(); }}>
+          <TouchableOpacity accessibilityLabel={copy.back} style={styles.back} onPress={() => { cancelSession(); if (navigation?.canGoBack?.()) navigation.goBack(); else navigation?.navigate?.('Dashboard'); }}>
             <MaterialCommunityIcons name="arrow-left" color="#FFF" size={24} />
           </TouchableOpacity>
           <View style={styles.headerCopy}>

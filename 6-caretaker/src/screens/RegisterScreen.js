@@ -22,7 +22,7 @@ const RegisterScreen = ({ navigation }) => {
           <View style={styles.form}>
             <Text style={styles.title}>Join your care team</Text>
             <Text style={styles.sub}>Your administrator creates caretaker accounts and assigns residents. Ask them to set up your account, then sign in with the email they registered.</Text>
-            <Button title="Back to Login" onPress={() => navigation.goBack()} style={styles.loginButton} />
+            <Button title="Back to Login" onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Login')} style={styles.loginButton} />
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

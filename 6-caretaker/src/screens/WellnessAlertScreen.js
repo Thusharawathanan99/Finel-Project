@@ -68,7 +68,7 @@ const WellnessAlertScreen = ({ route, navigation }) => {
     <SafeAreaView style={styles.safeArea}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Alerts')} style={styles.backBtn}>
           <MaterialCommunityIcons name="arrow-left" size={24} color="#171459" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Wellness Alert</Text>

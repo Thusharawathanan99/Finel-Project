@@ -223,7 +223,7 @@ const RegisterScreen = ({ navigation }) => {
 
           <View style={styles.footerContainer}>
             <Text style={styles.footerText}>Already have an account? </Text>
-            <Text style={styles.footerLink} onPress={() => navigation.goBack()}>Sign In</Text>
+            <Text style={styles.footerLink} onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Login')}>Sign In</Text>
           </View>
 
         </ScrollView>

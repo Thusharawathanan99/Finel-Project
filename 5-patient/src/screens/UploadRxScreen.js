@@ -226,7 +226,7 @@ const UploadRxScreen = ({ navigation }) => {
           
           {/* Header */}
           <View style={styles.header}>
-            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.closeBtn}>
+            <TouchableOpacity onPress={() => navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Dashboard')} style={styles.closeBtn}>
               <MaterialCommunityIcons name="close" size={24} color="#171459" />
             </TouchableOpacity>
             <View>
