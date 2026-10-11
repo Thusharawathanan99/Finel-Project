@@ -900,7 +900,7 @@ function loadComponentPrefix(p, componentName, handlers, initialStates, override
   });
   await test('Refresh hook reloads on focus and foreground and detaches listeners', async () => {
     const effects=[],listeners={};let loads=0;let removed=0;
-    const code=source('5-patient/src/useScreenRefresh.js').replace(/^import .*;\n/gm,'').replace(/export /g,'');
+    const code=source('5-patient/src/useScreenRefresh.js').replace(/^import .*;\r?\n/gm,'').replace(/export /g,'');
     const context=vm.createContext({useRef:value=>({current:value}),useEffect:fn=>effects.push(fn()),AppState:{addEventListener:(name,fn)=>{listeners.active=fn;return {remove(){removed++;}};}}});
     vm.runInContext(code+';this.hook=useScreenRefresh;',context);
     context.hook({addListener(name,fn){listeners.focus=fn;return ()=>removed++;}},async()=>{loads++;});await new Promise(resolve=>setImmediate(resolve));
