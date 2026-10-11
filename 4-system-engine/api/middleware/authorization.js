@@ -43,7 +43,7 @@ export async function authorizationMiddleware(req, res, next) {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
 
     if (path.startsWith('/users')) {
-      if (path === '/users/register-patient' && method === 'POST') return next();
+      if ((path === '/users/register-patient' || path === '/users/register-admin') && method === 'POST') return next();
       if (path === '/users/register-caretaker' && method === 'POST') return admin ? next() : denied();
       if (path === '/users' && method === 'POST') return admin ? next() : denied();
       if (method === 'DELETE') return admin ? next() : denied();

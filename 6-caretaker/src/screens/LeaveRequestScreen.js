@@ -9,8 +9,8 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 
 const LeaveRequestScreen = ({ navigation }) => {
-  const [startDate, setStartDate] = useState(new Date());
-  const [endDate, setEndDate] = useState(new Date(Date.now() + 86400000));
+  const [startDate, setStartDate] = useState(new Date(Date.now() + 48 * 3600 * 1000));
+  const [endDate, setEndDate] = useState(new Date(Date.now() + 72 * 3600 * 1000));
   const [showStartPicker, setShowStartPicker] = useState(false);
   const [showEndPicker, setShowEndPicker] = useState(false);
   const [reason, setReason] = useState('');
@@ -60,6 +60,31 @@ const LeaveRequestScreen = ({ navigation }) => {
       if (res.ok) {
         const data = await res.json();
         setLeaveHistory(data);
+
+        // If initial default dates overlap with any existing leave, automatically auto-adjust to next available date
+        const s = localDateKey(startDate);
+        const e = localDateKey(endDate);
+        const collision = data.find(item => {
+          if (item.status !== 'pending' && item.status !== 'approved') return false;
+          const is = String(item.start_date).slice(0, 10);
+          const ie = String(item.end_date).slice(0, 10);
+          return is <= e && ie >= s;
+        });
+        if (collision) {
+          let maxDateStr = localDateKey(new Date(Date.now() + 48 * 3600 * 1000));
+          for (const item of data) {
+            if (item.status === 'pending' || item.status === 'approved') {
+              const itemEnd = String(item.end_date).slice(0, 10);
+              if (itemEnd >= maxDateStr) maxDateStr = itemEnd;
+            }
+          }
+          const nextStart = parseCalendarDate(maxDateStr);
+          nextStart.setDate(nextStart.getDate() + 1);
+          const nextEnd = new Date(nextStart.getTime() + 24 * 3600 * 1000);
+          setStartDate(nextStart);
+          setEndDate(nextEnd);
+          initialDatesRef.current = { start: localDateKey(nextStart), end: localDateKey(nextEnd) };
+        }
       }
     } catch (err) {
       setLoadError('Leave history could not be loaded. Check your connection and try again.');
@@ -67,8 +92,68 @@ const LeaveRequestScreen = ({ navigation }) => {
     } finally {
       setLoadingHistory(false);
     }
-  }, []);
+  }, [startDate, endDate]);
   useScreenRefresh(navigation, fetchLeaveHistory);
+
+  const getOverlappingLeave = useCallback((start, end) => {
+    const s = localDateKey(start);
+    const e = localDateKey(end);
+    return leaveHistory.find(item => {
+      if (item.status !== 'pending' && item.status !== 'approved') return false;
+      const is = String(item.start_date).slice(0, 10);
+      const ie = String(item.end_date).slice(0, 10);
+      return is <= e && ie >= s;
+    });
+  }, [leaveHistory]);
+
+  const selectNextAvailableDates = useCallback(() => {
+    let maxDateStr = localDateKey(new Date(Date.now() + 48 * 3600 * 1000));
+    for (const item of leaveHistory) {
+      if (item.status === 'pending' || item.status === 'approved') {
+        const itemEnd = String(item.end_date).slice(0, 10);
+        if (itemEnd >= maxDateStr) maxDateStr = itemEnd;
+      }
+    }
+    const nextStart = parseCalendarDate(maxDateStr);
+    nextStart.setDate(nextStart.getDate() + 1);
+    const nextEnd = new Date(nextStart.getTime() + 24 * 3600 * 1000);
+    setStartDate(nextStart);
+    setEndDate(nextEnd);
+  }, [leaveHistory]);
+
+  const handleWithdraw = useCallback((requestId) => {
+    Alert.alert(
+      'Cancel Leave Request',
+      'Are you sure you want to withdraw this pending leave request?',
+      [
+        { text: 'Keep It', style: 'cancel' },
+        {
+          text: 'Yes, Withdraw',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { auth } = require('../firebase/config');
+              const user = auth.currentUser;
+              if (!user) return;
+              const token = await user.getIdToken();
+              const res = await apiFetch(`/caretakers/${user.uid}/leave-requests/${requestId}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${token}` }
+              });
+              if (!res.ok) {
+                const errBody = await res.json().catch(() => ({}));
+                throw new Error(errBody.error || 'Failed to cancel leave request');
+              }
+              Alert.alert('Request Withdrawn ✓', 'Your pending leave request has been cancelled.');
+              fetchLeaveHistory();
+            } catch (err) {
+              Alert.alert('Withdrawal Failed', err.message || 'Could not cancel leave request.');
+            }
+          }
+        }
+      ]
+    );
+  }, [fetchLeaveHistory]);
 
   const formatDate = (date) => {
     const d = parseCalendarDate(date);
@@ -98,16 +183,29 @@ const LeaveRequestScreen = ({ navigation }) => {
   const handleSubmit = async () => {
     if (submitLock.current) return;
     if (!reason.trim()) {
-      Alert.alert('Missing Reason', 'Please provide a reason for your leave request.');
+      Alert.alert('Reason Required', 'Please provide a reason for your leave request.');
       return;
     }
 
     if (localDateKey(startDate) < localDateKey()) {
-      Alert.alert('Invalid Dates', 'Start date cannot be in the past.');
+      Alert.alert('Invalid Start Date', 'Start date cannot be in the past.');
       return;
     }
     if (localDateKey(endDate) < localDateKey(startDate)) {
-      Alert.alert('Invalid Dates', 'End date cannot be before start date.');
+      Alert.alert('Invalid Date Range', 'End date cannot be before start date.');
+      return;
+    }
+
+    const conflict = getOverlappingLeave(startDate, endDate);
+    if (conflict) {
+      Alert.alert(
+        'Date Overlap Detected',
+        `The selected dates overlap an existing ${conflict.status} leave (${String(conflict.start_date).slice(0, 10)} to ${String(conflict.end_date).slice(0, 10)}). Would you like to auto-select the next available dates?`,
+        [
+          { text: 'Auto-Fix Dates', onPress: () => selectNextAvailableDates() },
+          { text: 'Change Manually', style: 'cancel' }
+        ]
+      );
       return;
     }
 
@@ -136,13 +234,17 @@ const LeaveRequestScreen = ({ navigation }) => {
         body: JSON.stringify(payload)
       });
 
-      if (!res.ok) throw new Error('Failed to submit leave request');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to submit leave request');
+      }
 
       Alert.alert(
         'Request Submitted ✓',
         `Leave request for ${getDayCount()} day(s) has been sent to admin for approval.`,
         [{
-          text: 'OK', onPress: () => {
+          text: 'Great, Continue',
+          onPress: () => {
             initialDatesRef.current = { start: localDateKey(startDate), end: localDateKey(endDate) };
             setReason('');
             setActiveTab('history');
@@ -152,12 +254,14 @@ const LeaveRequestScreen = ({ navigation }) => {
       );
     } catch (error) {
       console.error(error);
-      Alert.alert('Error', 'Could not submit leave request. Please try again later.');
+      Alert.alert('Submission Failed', error.message || 'Could not submit leave request. Please try again later.');
     } finally {
       submitLock.current=false;
       setIsSubmitting(false);
     }
   };
+
+  const conflictingLeave = getOverlappingLeave(startDate, endDate);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -211,45 +315,116 @@ const LeaveRequestScreen = ({ navigation }) => {
 
                 {/* Start Date */}
                 <Text style={styles.label}>Start Date</Text>
-                <TouchableOpacity style={styles.dateButton} onPress={() => setShowStartPicker(true)}>
-                  <MaterialCommunityIcons name="calendar-start" size={22} color="#6D38FF" />
-                  <Text style={styles.dateText}>{formatDate(startDate)}</Text>
-                  <MaterialCommunityIcons name="chevron-down" size={20} color="#9496AA" />
-                </TouchableOpacity>
-                {showStartPicker && (
-                  <DateTimePicker
-                    value={startDate}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'spinner' : 'calendar'}
-                    minimumDate={new Date()}
-                    onChange={(event, date) => {
-                      setShowStartPicker(false);
-                      if (date) {
-                        setStartDate(date);
-                        if (date > endDate) setEndDate(date);
+                {Platform.OS === 'web' ? (
+                  <View style={[styles.dateButton, { paddingVertical: 8, paddingHorizontal: 12 }]}>
+                    <MaterialCommunityIcons name="calendar-start" size={22} color="#6D38FF" style={{ marginRight: 8 }} />
+                    {React.createElement('input', {
+                      type: 'date',
+                      value: localDateKey(startDate),
+                      min: localDateKey(),
+                      onChange: (e) => {
+                        const val = e.target.value;
+                        if (val) {
+                          const [y, m, d] = val.split('-').map(Number);
+                          const newD = new Date(y, m - 1, d);
+                          if (!isNaN(newD.getTime())) {
+                            setStartDate(newD);
+                            if (newD > endDate) setEndDate(newD);
+                          }
+                        }
+                      },
+                      style: {
+                        flex: 1,
+                        fontSize: 16,
+                        color: '#171459',
+                        outline: 'none',
+                        border: 'none',
+                        backgroundColor: 'transparent',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontWeight: '500',
+                        width: '100%',
                       }
-                    }}
-                  />
+                    })}
+                  </View>
+                ) : (
+                  <>
+                    <TouchableOpacity style={styles.dateButton} onPress={() => setShowStartPicker(true)}>
+                      <MaterialCommunityIcons name="calendar-start" size={22} color="#6D38FF" />
+                      <Text style={styles.dateText}>{formatDate(startDate)}</Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#9496AA" />
+                    </TouchableOpacity>
+                    {showStartPicker && (
+                      <DateTimePicker
+                        value={startDate}
+                        mode="date"
+                        display={Platform.OS === 'ios' ? 'spinner' : 'calendar'}
+                        minimumDate={new Date()}
+                        onChange={(event, date) => {
+                          setShowStartPicker(false);
+                          if (date) {
+                            setStartDate(date);
+                            if (date > endDate) setEndDate(date);
+                          }
+                        }}
+                      />
+                    )}
+                  </>
                 )}
 
                 {/* End Date */}
                 <Text style={styles.label}>End Date</Text>
-                <TouchableOpacity style={styles.dateButton} onPress={() => setShowEndPicker(true)}>
-                  <MaterialCommunityIcons name="calendar-end" size={22} color="#6D38FF" />
-                  <Text style={styles.dateText}>{formatDate(endDate)}</Text>
-                  <MaterialCommunityIcons name="chevron-down" size={20} color="#9496AA" />
-                </TouchableOpacity>
-                {showEndPicker && (
-                  <DateTimePicker
-                    value={endDate}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'spinner' : 'calendar'}
-                    minimumDate={startDate}
-                    onChange={(event, date) => {
-                      setShowEndPicker(false);
-                      if (date) setEndDate(date);
-                    }}
-                  />
+                {Platform.OS === 'web' ? (
+                  <View style={[styles.dateButton, { paddingVertical: 8, paddingHorizontal: 12 }]}>
+                    <MaterialCommunityIcons name="calendar-end" size={22} color="#6D38FF" style={{ marginRight: 8 }} />
+                    {React.createElement('input', {
+                      type: 'date',
+                      value: localDateKey(endDate),
+                      min: localDateKey(startDate),
+                      onChange: (e) => {
+                        const val = e.target.value;
+                        if (val) {
+                          const [y, m, d] = val.split('-').map(Number);
+                          const newD = new Date(y, m - 1, d);
+                          if (!isNaN(newD.getTime())) {
+                            setEndDate(newD);
+                          }
+                        }
+                      },
+                      style: {
+                        flex: 1,
+                        fontSize: 16,
+                        color: '#171459',
+                        outline: 'none',
+                        border: 'none',
+                        backgroundColor: 'transparent',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontWeight: '500',
+                        width: '100%',
+                      }
+                    })}
+                  </View>
+                ) : (
+                  <>
+                    <TouchableOpacity style={styles.dateButton} onPress={() => setShowEndPicker(true)}>
+                      <MaterialCommunityIcons name="calendar-end" size={22} color="#6D38FF" />
+                      <Text style={styles.dateText}>{formatDate(endDate)}</Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#9496AA" />
+                    </TouchableOpacity>
+                    {showEndPicker && (
+                      <DateTimePicker
+                        value={endDate}
+                        mode="date"
+                        display={Platform.OS === 'ios' ? 'spinner' : 'calendar'}
+                        minimumDate={startDate}
+                        onChange={(event, date) => {
+                          setShowEndPicker(false);
+                          if (date) setEndDate(date);
+                        }}
+                      />
+                    )}
+                  </>
                 )}
 
                 {/* Duration chip */}
@@ -257,6 +432,24 @@ const LeaveRequestScreen = ({ navigation }) => {
                   <MaterialCommunityIcons name="clock-outline" size={16} color="#7C3AED" />
                   <Text style={styles.durationText}>{getDayCount()} day{getDayCount() > 1 ? 's' : ''} leave</Text>
                 </View>
+
+                {/* Overlap Banner if any */}
+                {conflictingLeave ? (
+                  <View style={styles.overlapBanner}>
+                    <MaterialCommunityIcons name="calendar-alert" size={24} color="#DC2626" />
+                    <View style={{ flex: 1, marginHorizontal: 10 }}>
+                      <Text style={styles.overlapTitle}>
+                        Dates overlap an existing {conflictingLeave.status} leave!
+                      </Text>
+                      <Text style={styles.overlapDesc}>
+                        {String(conflictingLeave.start_date).slice(0, 10)} to {String(conflictingLeave.end_date).slice(0, 10)}
+                      </Text>
+                    </View>
+                    <TouchableOpacity style={styles.autoFixBtn} onPress={selectNextAvailableDates}>
+                      <Text style={styles.autoFixBtnText}>Auto-Fix Dates</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
 
                 {/* Reason */}
                 <Text style={styles.label}>Reason for Leave</Text>
@@ -278,10 +471,19 @@ const LeaveRequestScreen = ({ navigation }) => {
 
             {/* Submit */}
             <View style={styles.footer}>
+              {conflictingLeave ? (
+                <Text style={{ textAlign: 'center', fontSize: 12, color: '#DC2626', marginBottom: 8, fontWeight: '700' }}>
+                  * Selected dates overlap an existing leave request. Tap "Auto-Fix Dates" above.
+                </Text>
+              ) : !reason.trim() ? (
+                <Text style={{ textAlign: 'center', fontSize: 12, color: '#9496AA', marginBottom: 8 }}>
+                  * Please enter a reason above to submit your leave request
+                </Text>
+              ) : null}
               <TouchableOpacity
-                style={[styles.submitBtn, (!reason.trim() || isSubmitting) && styles.submitBtnDisabled]}
+                style={[styles.submitBtn, (!reason.trim() || isSubmitting || !!conflictingLeave) && styles.submitBtnDisabled]}
                 onPress={handleSubmit}
-                disabled={!reason.trim() || isSubmitting}
+                disabled={!reason.trim() || isSubmitting || !!conflictingLeave}
               >
                 <MaterialCommunityIcons name="send" size={20} color="#FFF" style={{ marginRight: 8 }} />
                 <Text style={styles.submitBtnText}>{isSubmitting ? 'Submitting...' : 'Submit Request'}</Text>
@@ -363,6 +565,17 @@ const LeaveRequestScreen = ({ navigation }) => {
                       <Text style={styles.requestedAt}>
                         Requested {leave.request_date ? formatDate(leave.request_date) : '—'}
                       </Text>
+
+                      {/* Withdraw pending leave request button */}
+                      {leave.status === 'pending' && (
+                        <TouchableOpacity
+                          style={styles.withdrawBtn}
+                          onPress={() => handleWithdraw(leave.request_id)}
+                        >
+                          <MaterialCommunityIcons name="close-circle-outline" size={16} color="#DC2626" />
+                          <Text style={styles.withdrawBtnText}>Cancel / Withdraw Request</Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   );
                 })
@@ -564,7 +777,57 @@ const styles = StyleSheet.create({
   leaveHeroIcon: { width: 55, height: 65, borderRadius: 20, backgroundColor: '#3478FF', alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '-5deg' }] },
   leaveEyebrow: { fontSize: 7, fontWeight: '800', letterSpacing: 1, color: '#D8CCFF', marginBottom: 9 },
   leaveHeroTitle: { fontSize: 23, color: '#FFFFFF', fontWeight: '800', letterSpacing: -0.6 },
-  leaveHeroSub: { fontSize: 10, color: '#D8CCFF', lineHeight: 17, marginTop: 7 }
+  leaveHeroSub: { fontSize: 10, color: '#D8CCFF', lineHeight: 17, marginTop: 7 },
+  overlapBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1.5,
+    borderColor: '#FECACA',
+    borderRadius: 16,
+    padding: 12,
+    marginBottom: 20,
+  },
+  overlapTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#991B1B',
+  },
+  overlapDesc: {
+    fontSize: 11,
+    color: '#B91C1C',
+    marginTop: 2,
+  },
+  autoFixBtn: {
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } : {}),
+  },
+  autoFixBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  withdrawBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    borderRadius: 12,
+    paddingVertical: 10,
+    marginTop: 12,
+    gap: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } : {}),
+  },
+  withdrawBtnText: {
+    color: '#DC2626',
+    fontSize: 13,
+    fontWeight: '700',
+  },
 });
 
 export default LeaveRequestScreen;

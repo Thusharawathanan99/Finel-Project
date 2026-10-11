@@ -286,6 +286,8 @@ const PatientProfileScreen = ({ route, navigation }) => {
                   <View style={{ flex: 1 }}>
                     <Text style={styles.medName}>{med.drug_name}</Text>
                     <Text style={styles.medDetails}>{med.dosage} • {med.frequency}</Text>
+                    {Boolean(med.duration) && <Text style={{ fontSize: 12, color: '#6D38FF', marginTop: 2 }}>Duration: {med.duration}</Text>}
+                    {Boolean(med.instructions) && <Text style={{ fontSize: 12, color: '#475569', marginTop: 2, fontStyle: 'italic' }}>{med.instructions}</Text>}
                   </View>
                   <TouchableOpacity 
                     style={styles.finishBtn}
@@ -538,14 +540,62 @@ const PatientProfileScreen = ({ route, navigation }) => {
               {/* Date & Time */}
               <Text style={{ fontSize: 14, fontWeight: '700', color: '#475569', marginBottom: 8 }}>Appointment Details</Text>
               <View style={{ flexDirection: 'row', gap: 10, marginBottom: 12 }}>
-                <TouchableOpacity onPress={() => setShowDatePicker(true)} style={{ flex: 1, borderWidth: 1, borderColor: '#E6E1FB', borderRadius: 12, padding: 14, backgroundColor: '#F6F5FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <MaterialCommunityIcons name="calendar" size={18} color="#6D38FF" />
-                  <Text style={{ fontSize: 14, color: apptForm.date ? '#171459' : '#9496AA' }}>{apptForm.date || 'Select Date *'}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setShowTimePicker(true)} style={{ flex: 1, borderWidth: 1, borderColor: '#E6E1FB', borderRadius: 12, padding: 14, backgroundColor: '#F6F5FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <MaterialCommunityIcons name="clock-outline" size={18} color="#6D38FF" />
-                  <Text style={{ fontSize: 14, color: apptForm.time ? '#171459' : '#9496AA' }}>{apptForm.time || 'Select Time'}</Text>
-                </TouchableOpacity>
+                {Platform.OS === 'web' ? (
+                  <>
+                    <View style={{ flex: 1, borderWidth: 1, borderColor: '#E6E1FB', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#F6F5FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <MaterialCommunityIcons name="calendar" size={18} color="#6D38FF" />
+                      {React.createElement('input', {
+                        type: 'date',
+                        value: apptForm.date,
+                        min: localDateKey(),
+                        onChange: (e) => setApptForm(p => ({ ...p, date: e.target.value })),
+                        style: {
+                          flex: 1,
+                          fontSize: 14,
+                          color: '#171459',
+                          outline: 'none',
+                          border: 'none',
+                          backgroundColor: 'transparent',
+                          cursor: 'pointer',
+                          fontFamily: 'inherit',
+                          fontWeight: '500',
+                          width: '100%',
+                        }
+                      })}
+                    </View>
+                    <View style={{ flex: 1, borderWidth: 1, borderColor: '#E6E1FB', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#F6F5FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <MaterialCommunityIcons name="clock-outline" size={18} color="#6D38FF" />
+                      {React.createElement('input', {
+                        type: 'time',
+                        value: apptForm.time,
+                        onChange: (e) => setApptForm(p => ({ ...p, time: e.target.value })),
+                        style: {
+                          flex: 1,
+                          fontSize: 14,
+                          color: '#171459',
+                          outline: 'none',
+                          border: 'none',
+                          backgroundColor: 'transparent',
+                          cursor: 'pointer',
+                          fontFamily: 'inherit',
+                          fontWeight: '500',
+                          width: '100%',
+                        }
+                      })}
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <TouchableOpacity onPress={() => setShowDatePicker(true)} style={{ flex: 1, borderWidth: 1, borderColor: '#E6E1FB', borderRadius: 12, padding: 14, backgroundColor: '#F6F5FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <MaterialCommunityIcons name="calendar" size={18} color="#6D38FF" />
+                      <Text style={{ fontSize: 14, color: apptForm.date ? '#171459' : '#9496AA' }}>{apptForm.date || 'Select Date *'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => setShowTimePicker(true)} style={{ flex: 1, borderWidth: 1, borderColor: '#E6E1FB', borderRadius: 12, padding: 14, backgroundColor: '#F6F5FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <MaterialCommunityIcons name="clock-outline" size={18} color="#6D38FF" />
+                      <Text style={{ fontSize: 14, color: apptForm.time ? '#171459' : '#9496AA' }}>{apptForm.time || 'Select Time'}</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
               </View>
               {showDatePicker && (
                 <DateTimePicker

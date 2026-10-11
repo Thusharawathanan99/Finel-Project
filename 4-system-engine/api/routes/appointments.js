@@ -100,6 +100,28 @@ router.put('/appointments/:id', async (req, res) => {
     values.push(req.params.id);
     await pool.execute(`UPDATE appointments SET ${fields.join(', ')} WHERE appointment_id = ?`, values);
 
+    // Supersede previous booking notifications
+    await pool.execute('UPDATE notifications SET is_read = TRUE WHERE related_id = ? AND type = "appointment"', [req.params.id]).catch(() => {});
+    if (status === 'cancelled' || status === 'rescheduled' || appointmentDate || appointmentTime) {
+      try {
+        const [apptRows] = await pool.execute('SELECT resident_id, doctor_name, appointment_date, appointment_time, status FROM appointments WHERE appointment_id = ? LIMIT 1', [req.params.id]);
+        if (apptRows.length) {
+          const appt = apptRows[0];
+          const isCancelled = appt.status === 'cancelled';
+          const title = isCancelled ? `Appointment Cancelled: Dr. ${appt.doctor_name || 'Doctor'}` : `Appointment Rescheduled: Dr. ${appt.doctor_name || 'Doctor'}`;
+          const msg = isCancelled
+            ? `Your appointment with Dr. ${appt.doctor_name || 'Doctor'} has been cancelled.`
+            : `Your appointment with Dr. ${appt.doctor_name || 'Doctor'} is now scheduled for ${appt.appointment_date}${appt.appointment_time ? ' at ' + appt.appointment_time : ''}.`;
+          await pool.execute(
+            'INSERT INTO notifications (resident_id, title, message, type, related_id) VALUES (?, ?, ?, ?, ?)',
+            [appt.resident_id, title, msg, 'appointment', req.params.id]
+          );
+        }
+      } catch (err) {
+        console.warn('[Appointments] Notice update warning:', err.message);
+      }
+    }
+
     res.json({ message: 'Appointment updated' });
   } catch (error) {
     console.error('[Appointments] Update error:', error.message);
@@ -110,6 +132,7 @@ router.put('/appointments/:id', async (req, res) => {
 // DELETE /api/appointments/:id
 router.delete('/appointments/:id', async (req, res) => {
   try {
+    await pool.execute('UPDATE notifications SET is_read = TRUE WHERE related_id = ? AND type = "appointment"', [req.params.id]).catch(() => {});
     await pool.execute('DELETE FROM appointments WHERE appointment_id = ?', [req.params.id]);
     res.json({ message: 'Appointment deleted' });
   } catch (error) {

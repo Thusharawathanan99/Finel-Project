@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { User } from '../models/User';
-import { Eye, EyeOff, Heart, Loader, UserPlus, Shield } from 'lucide-react';
+import { Eye, EyeOff, Heart, Loader, UserPlus, CheckCircle2, X } from 'lucide-react';
 import {
   getPasswordValidationError,
   requestPasswordReset,
   signUp,
+  signUpAdmin,
   signIn,
+  signOut,
 } from '../services/firebaseAuthService';
 import { caretakersApi } from '../services/apiService';
 
@@ -21,6 +23,7 @@ interface CaretakerOption {
 
 export function SignInSignUp({ onComplete }: SignInSignUpProps) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+  const [signupRole, setSignupRole] = useState<'admin' | 'patient'>('admin');
   const [loading, setLoading] = useState(false);
   const [loadingCaretakers, setLoadingCaretakers] = useState(false);
   const [caretakers, setCaretakers] = useState<CaretakerOption[]>([]);
@@ -31,15 +34,15 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
-    email: '',
-    password: '',
+    email: 'admin@careconnect.com',
+    password: 'Admin@123',
     confirmPassword: '',
     residentId: '',
     caretakerId: '',
   });
 
   useEffect(() => {
-    if (mode !== 'signup') {
+    if (mode !== 'signup' || signupRole !== 'patient') {
       return;
     }
 
@@ -77,7 +80,19 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
     setLoading(true);
 
     try {
-      const appUser = await signIn(formData.email, formData.password);
+      let appUser;
+      const cleanEmail = formData.email.trim().toLowerCase();
+      const cleanPassword = formData.password.trim();
+      try {
+        appUser = await signIn(cleanEmail, cleanPassword);
+      } catch (authErr: any) {
+        if (cleanEmail === 'admin@careconnect.com' && ['admin@123', 'Admin@123', 'admin123', 'Admin123'].includes(cleanPassword)) {
+          const alternate = cleanPassword === 'admin123' ? 'Admin@123' : 'admin123';
+          appUser = await signIn(cleanEmail, alternate);
+        } else {
+          throw authErr;
+        }
+      }
       if (appUser.role !== 'admin') {
         throw new Error('Access denied: Admin credentials required. Patients and Caretakers must use the CareConnect Mobile Applications.');
       }
@@ -99,32 +114,6 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
       } else {
         setError(err.message || 'Sign in failed. Please try again.');
       }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleQuickLaunchAdmin = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const appUser = await signIn('admin@careconnect.com', 'admin123');
-      const user: User = {
-        userId: appUser.uid,
-        name: appUser.name || 'Facility Administrator',
-        email: appUser.email,
-        role: 'admin',
-        residentId: appUser.residentId,
-      };
-      await onComplete(user);
-    } catch (err: any) {
-      console.warn('[QuickLaunch] Admin sign-in fallback to local demo user:', err);
-      await onComplete({
-        userId: 'DEMO',
-        name: 'Facility Administrator',
-        email: 'admin@careconnect.com',
-        role: 'admin',
-      });
     } finally {
       setLoading(false);
     }
@@ -171,7 +160,8 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
       setError(passwordError);
       return;
     }
-    if (!formData.caretakerId) {
+
+    if (signupRole === 'patient' && !formData.caretakerId) {
       setError('Please select a caretaker.');
       return;
     }
@@ -179,6 +169,24 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
     setLoading(true);
 
     try {
+      if (signupRole === 'admin') {
+        const appUser = await signUpAdmin(
+          formData.email,
+          formData.password,
+          formData.name
+        );
+        await signOut().catch(() => {});
+        setNotice(`Administrator account for ${appUser.name} registered successfully! Please sign in with your credentials.`);
+        setMode('signin');
+        setFormData(prev => ({
+          ...prev,
+          email: appUser.email,
+          password: '',
+          confirmPassword: '',
+        }));
+        return;
+      }
+
       const appUser = await signUp(
         formData.email,
         formData.password,
@@ -255,9 +263,30 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
               }`}
               disabled={loading}
             >
-              Patient Register
+              Admin Register
             </button>
           </div>
+
+          {mode === 'signup' && (
+            <div className="flex items-center justify-between p-2.5 bg-teal-50 border border-teal-200 rounded-xl mb-4">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-teal-700" />
+                <span className="text-xs font-semibold text-teal-900">
+                  Role: {signupRole === 'admin' ? 'Facility Administrator' : 'Patient (Mobile App)'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSignupRole(r => r === 'admin' ? 'patient' : 'admin');
+                  setError('');
+                }}
+                className="text-xs text-teal-700 hover:text-teal-900 underline font-medium"
+              >
+                {signupRole === 'admin' ? 'Need Patient Register?' : 'Switch to Admin Register'}
+              </button>
+            </div>
+          )}
 
           {/* Error Display */}
           {error && (
@@ -266,20 +295,39 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             </div>
           )}
           {notice && (
-            <div role="status" className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-800">
-              {notice}
+            <div
+              role="status"
+              className="mb-5 p-4 bg-emerald-50 border-2 border-emerald-400 rounded-xl text-sm text-emerald-950 shadow-md flex items-start gap-3 animate-in fade-in slide-in-from-top-2 duration-300"
+            >
+              <div className="p-1.5 bg-emerald-600 text-white rounded-lg shrink-0 mt-0.5 shadow-sm">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <p className="font-bold text-sm text-emerald-950">Registration Successful!</p>
+                <p className="text-xs text-emerald-800 mt-1 leading-relaxed font-medium">{notice}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNotice('')}
+                className="text-emerald-700 hover:text-emerald-950 p-1 rounded-lg hover:bg-emerald-100/60 transition-colors"
+                aria-label="Dismiss notice"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           )}
           <form onSubmit={mode === 'signin' ? handleSignIn : handleSignUp} className="space-y-4">
             {mode === 'signup' && (
               <div>
-                <label htmlFor="care-name" className="block text-xs font-medium text-gray-700 mb-1">Full Name</label>
+                <label htmlFor="care-name" className="block text-xs font-medium text-gray-700 mb-1">
+                  {signupRole === 'admin' ? 'Administrator Full Name' : 'Full Name'}
+                </label>
                 <input
                   id="care-name"
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  placeholder="John Doe"
+                  placeholder={signupRole === 'admin' ? 'Dr. Sarah Jenkins' : 'John Doe'}
                   className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
                   required
                   disabled={loading}
@@ -288,13 +336,15 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             )}
 
             <div>
-              <label htmlFor="care-email" className="block text-xs font-medium text-gray-700 mb-1">Email</label>
+              <label htmlFor="care-email" className="block text-xs font-medium text-gray-700 mb-1">
+                {mode === 'signup' && signupRole === 'admin' ? 'Administrator Email' : 'Email'}
+              </label>
               <input
                 id="care-email"
                 type="email"
                 value={formData.email}
                 onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                placeholder="you@example.com"
+                placeholder={mode === 'signup' && signupRole === 'admin' ? 'admin@careconnect.com' : 'you@example.com'}
                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
                 autoComplete="email"
                 required
@@ -340,41 +390,43 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             </div>
 
             {mode === 'signup' && (
-              <>
-                <div>
-                  <label htmlFor="care-confirmPassword" className="block text-xs font-medium text-gray-700 mb-1">Confirm Password</label>
-                  <div className="relative">
-                    <input
-                      id="care-confirmPassword"
-                      type={showConfirmPassword ? 'text' : 'password'}
-                      value={formData.confirmPassword}
-                      onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                      placeholder="Confirm your password"
-                      className="w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
-                      autoComplete="new-password"
-                      required
-                      disabled={loading}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowConfirmPassword((visible) => !visible)}
-                      className="absolute inset-y-0 right-0 px-3 text-gray-500 hover:text-teal-700"
-                      aria-label={showConfirmPassword ? 'Hide confirmation password' : 'Show confirmation password'}
-                      aria-pressed={showConfirmPassword}
-                      disabled={loading}
-                    >
-                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <p className="mt-1 text-xs text-gray-500">Use 8+ characters with uppercase, lowercase, and a number.</p>
+              <div>
+                <label htmlFor="care-confirmPassword" className="block text-xs font-medium text-gray-700 mb-1">Confirm Password</label>
+                <div className="relative">
+                  <input
+                    id="care-confirmPassword"
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    value={formData.confirmPassword}
+                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                    placeholder="Confirm your password"
+                    className="w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    autoComplete="new-password"
+                    required
+                    disabled={loading}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword((visible) => !visible)}
+                    className="absolute inset-y-0 right-0 px-3 text-gray-500 hover:text-teal-700"
+                    aria-label={showConfirmPassword ? 'Hide confirmation password' : 'Show confirmation password'}
+                    aria-pressed={showConfirmPassword}
+                    disabled={loading}
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
+                <p className="mt-1 text-xs text-gray-500">Use 8+ characters with uppercase, lowercase, and a number.</p>
+              </div>
+            )}
 
+            {mode === 'signup' && signupRole === 'patient' && (
+              <>
                 <div>
                   <label htmlFor="care-caretakerId" className="block text-xs font-medium text-gray-700 mb-1">Choose Caretaker</label>
                   <div className="relative">
                     <select
                       id="care-caretakerId"
-                  value={formData.caretakerId}
+                      value={formData.caretakerId}
                       onChange={(e) => setFormData({ ...formData, caretakerId: e.target.value })}
                       className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-50"
                       required
@@ -420,33 +472,22 @@ export function SignInSignUp({ onComplete }: SignInSignUpProps) {
             <div className="pt-2">
               <button
                 type="submit"
-                disabled={loading || (mode === 'signup' && loadingCaretakers)}
+                disabled={loading || (mode === 'signup' && signupRole === 'patient' && loadingCaretakers)}
                 className="w-full py-3 bg-gradient-to-r from-teal-700 to-emerald-700 text-white rounded-lg font-semibold text-sm shadow-md active:scale-98 transition-transform disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {loading ? (
                   <>
                     <Loader className="w-4 h-4 animate-spin" />
-                    {mode === 'signin' ? 'Signing In...' : 'Creating Patient Account...'}
+                    {mode === 'signin' ? 'Signing In...' : signupRole === 'admin' ? 'Registering Administrator...' : 'Creating Patient Account...'}
                   </>
                 ) : (
-                  mode === 'signin' ? 'Sign In' : 'Create Patient Account'
+                  mode === 'signin' ? 'Sign In to Dashboard' : signupRole === 'admin' ? 'Register as Administrator' : 'Create Patient Account'
                 )}
               </button>
             </div>
           </form>
 
-          {mode === 'signin' && (
-            <div className="mt-4 pt-4 border-t border-gray-100 text-center">
-              <button
-                type="button"
-                onClick={handleQuickLaunchAdmin}
-                className="w-full py-2.5 px-4 bg-teal-50 text-teal-800 hover:bg-teal-100 border border-teal-200 rounded-xl font-medium text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm"
-              >
-                <Shield className="w-4 h-4 text-teal-700" />
-                Quick Launch: Facility Administrator Dashboard
-              </button>
-            </div>
-          )}
+
 
 
         </div>

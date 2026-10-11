@@ -4,6 +4,7 @@ import pool from '../db.js';
 import { randomUUID } from 'crypto';
 import { validDate, validText } from '../validation.js';
 import { appendAudit } from '../monitoringService.js';
+import { effectiveCaretakersForResident } from '../careScope.js';
 
 const router = Router();
 const patientFields=new Set(['address','city','state','zipCode','emergencyContactName','emergencyContactPhone','emergencyContactRelation']);
@@ -12,7 +13,8 @@ function validResidentFields(body){
   for(const [key,max]of Object.entries(lengths))if(body[key]!==undefined&&!validText(body[key],max,key!=='name'))return false;
   if(body.age!==undefined&&body.age!==null&&(!Number.isInteger(body.age)||body.age<0||body.age>130))return false;
   for(const key of ['dateOfBirth','admissionDate'])if(body[key]!==undefined&&body[key]!==null&&body[key]!==''&&!validDate(body[key]))return false;
-  for(const key of ['allergies','dietaryRestrictions','children'])if(body[key]!==undefined&&body[key]!==null&&(!Array.isArray(body[key])||body[key].length>100))return false;
+  for(const key of ['allergies','dietaryRestrictions'])if(body[key]!==undefined&&body[key]!==null&&(!Array.isArray(body[key])||body[key].length>100||body[key].some(item=>!validText(item,100))))return false;
+  if(body.children!==undefined&&body.children!==null&&(!Array.isArray(body.children)||body.children.length>100))return false;
   return true;
 }
 
@@ -24,6 +26,7 @@ router.get('/', async (req, res) => {
     const where = scope ? `WHERE r.resident_id IN (${scope.map(() => '?').join(',')})` : '';
     const [rows] = await pool.execute(`
       SELECT r.*,
+        (SELECT u.email FROM users u WHERE u.resident_id = r.resident_id LIMIT 1) as account_email,
         (SELECT COUNT(*) FROM prescriptions p WHERE p.resident_id=r.resident_id) prescription_count,
         (SELECT COUNT(*) FROM medications m JOIN prescriptions p ON p.prescription_id=m.prescription_id WHERE p.resident_id=r.resident_id) medication_count,
         (SELECT e.state_score FROM emotional_states e WHERE e.resident_id=r.resident_id ORDER BY e.recorded_at DESC,e.id DESC LIMIT 1) latest_wellness_score,
@@ -42,7 +45,11 @@ router.get('/', async (req, res) => {
 // GET /api/residents/:id — Get single resident with prescriptions & emotions
 router.get('/:id', async (req, res) => {
   try {
-    const [residents] = await pool.execute('SELECT * FROM residents WHERE resident_id = ?', [req.params.id]);
+    const [residents] = await pool.execute(`
+      SELECT r.*,
+        (SELECT u.email FROM users u WHERE u.resident_id = r.resident_id LIMIT 1) as account_email
+      FROM residents r WHERE r.resident_id = ?
+    `, [req.params.id]);
 
     if (residents.length === 0) {
       return res.status(404).json({ error: 'Resident not found' });
@@ -87,18 +94,21 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// GET /api/residents/:id/caretakers — Get assigned caretaker(s) for a resident
+// GET /api/residents/:id/caretakers — Get assigned caretaker(s) for a resident, including active approved replacements
 router.get('/:id/caretakers', async (req, res) => {
   try {
-    const [rows] = await pool.execute(`
-      SELECT c.caretaker_id, c.name, c.email, c.phone, c.specialization, c.is_active
-      FROM caretakers c
-      INNER JOIN caretaker_residents cr ON cr.caretaker_id = c.caretaker_id
-      WHERE cr.resident_id = ?
-      ORDER BY c.name
-    `, [req.params.id]);
-
-    res.json(rows);
+    const caretakers = await effectiveCaretakersForResident(pool, req.params.id);
+    if (!caretakers.length) {
+      const [rows] = await pool.execute(`
+        SELECT c.caretaker_id, c.name, c.email, c.phone, c.specialization, c.is_active
+        FROM caretakers c
+        INNER JOIN caretaker_residents cr ON cr.caretaker_id = c.caretaker_id
+        WHERE cr.resident_id = ?
+        ORDER BY c.name
+      `, [req.params.id]);
+      return res.json(rows);
+    }
+    res.json(caretakers);
   } catch (error) {
     console.error('[Residents] Get caretakers error:', error.message);
     res.status(500).json({ error: error.message });
@@ -180,11 +190,32 @@ router.put('/:id', async (req, res) => {
     }
 
     values.push(req.params.id);
-    const [updated]=await pool.execute(`UPDATE residents SET ${fields.join(', ')} WHERE resident_id = ?`, values);
-    if(updated.affectedRows===0)return res.status(404).json({error:'Resident not found'});
-    await appendAudit(pool,{actorType:'user',actorId:req.user.uid,action:'resident_profile_updated',resourceType:'resident',resourceId:req.params.id,residentId:req.params.id,details:{fields:Object.keys(req.body)}});
-
-    res.json({ message: 'Resident updated' });
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      const [updated] = await connection.execute(`UPDATE residents SET ${fields.join(', ')} WHERE resident_id = ?`, values);
+      if (updated.affectedRows === 0) {
+        await connection.rollback();
+        return res.status(404).json({ error: 'Resident not found' });
+      }
+      await appendAudit(connection, {
+        actorType: 'user',
+        actorId: req.user.uid,
+        action: 'resident_profile_updated',
+        resourceType: 'resident',
+        resourceId: req.params.id,
+        residentId: req.params.id,
+        details: { fields: Object.keys(req.body) }
+      });
+      await connection.commit();
+      res.json({ message: 'Resident updated' });
+    } catch (err) {
+      if (connection) await connection.rollback().catch(() => {});
+      throw err;
+    } finally {
+      connection?.release();
+    }
   } catch (error) {
     console.error('[Residents] Update error:', error.message);
     res.status(500).json({ error: error.message });

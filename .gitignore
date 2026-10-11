@@ -15,6 +15,7 @@ build/
 .expo-audit-web/
 .metro-cache/
 run-logs/
+tmp/
 *.log
 audit.json
 

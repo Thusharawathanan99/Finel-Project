@@ -108,10 +108,11 @@ export function beamSearchDecode(
 ): { text: string; score: number }[] {
   interface Beam {
     sequence: number[];
+    lastRawIndex: number;
     score: number;
   }
 
-  let beams: Beam[] = [{ sequence: [], score: 1.0 }];
+  let beams: Beam[] = [{ sequence: [], lastRawIndex: -1, score: 1.0 }];
 
   for (let t = 0; t < timesteps; t++) {
     // Softmax for this timestep
@@ -140,26 +141,36 @@ export function beamSearchDecode(
     const newBeams: Beam[] = [];
     for (const beam of beams) {
       for (const { prob, idx } of topK) {
-        const lastChar = beam.sequence.length > 0 ? beam.sequence[beam.sequence.length - 1] : -1;
         const newSequence = [...beam.sequence];
 
-        if (idx === BLANK_INDEX) {
-          // Blank: keep sequence unchanged
-        } else if (idx === lastChar) {
-          // Same char as previous: don't add duplicate
-        } else {
-          newSequence.push(idx);
+        if (idx !== beam.lastRawIndex) {
+          if (idx !== BLANK_INDEX) {
+            newSequence.push(idx);
+          }
         }
 
         newBeams.push({
           sequence: newSequence,
+          lastRawIndex: idx,
           score: beam.score * prob,
         });
       }
     }
 
+    // Merge duplicate paths with the same decoded sequence and lastRawIndex
+    const mergedMap = new Map<string, Beam>();
+    for (const b of newBeams) {
+      const key = `${b.sequence.join(',')}|${b.lastRawIndex}`;
+      const existing = mergedMap.get(key);
+      if (existing) {
+        existing.score += b.score;
+      } else {
+        mergedMap.set(key, { ...b });
+      }
+    }
+
     // Keep only top beamWidth beams
-    beams = newBeams
+    beams = Array.from(mergedMap.values())
       .sort((a, b) => b.score - a.score)
       .slice(0, beamWidth);
   }

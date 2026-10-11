@@ -50,11 +50,13 @@ def normalize_medications(values):
 def decode_image_base64(value, max_bytes):
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Image base64 data is required.")
+    value = value.strip()
     if value.startswith("data:"):
-        match = re.fullmatch(r"data:image/(?:jpeg|png|webp|bmp);base64,([A-Za-z0-9+/=]+)", value)
+        match = re.match(r"^data:image/(?:jpeg|jpg|png|webp|bmp);base64,(.+)$", value, re.DOTALL | re.IGNORECASE)
         if not match:
             raise ValueError("Unsupported image data URL.")
-        value = match.group(1)
+        value = match.group(1).strip()
+    value = re.sub(r"\s+", "", value)
     if len(value) > 4 * ((max_bytes + 2) // 3):
         raise ValueError("Image exceeds the byte limit.")
     try:
@@ -83,4 +85,6 @@ def load_image_bytes(data, max_bytes, max_pixels):
     except Exception as error:
         if isinstance(error, ValueError):
             raise
-        raise ValueError("Image could not be decoded.") from error
+        import traceback
+        traceback.print_exc()
+        raise ValueError(f"Image could not be decoded: {error}") from error

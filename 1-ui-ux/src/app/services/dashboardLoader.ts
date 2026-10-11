@@ -27,6 +27,7 @@ export async function loadDashboardSnapshot(user: User): Promise<Dashboard> {
   const residents = await Promise.all(rows.map(async row => {
     const full = await residentsApi.getById(row.resident_id);
     const resident = new Resident(full.resident_id, full.name, full.age || 0);
+    resident.accountEmail = full.account_email || row.account_email || undefined;
     resident.updatePersonalDetails({
       dateOfBirth: date(full.date_of_birth), address: full.address || undefined,
       city: full.city || undefined, state: full.state || undefined, zipCode: full.zip_code || undefined,

@@ -600,8 +600,8 @@ test('clearing a patient address sends the empty value to the database', async (
   const loaded = await source('routes/residents.js', { execute: () => [{ affectedRows: 1 }] });
   const req = request('/residents/R-A', 'PUT'), res = response(); req.params.id = 'R-A'; req.body = { address: '' };
   await loaded.routes.find(r => r.method === 'put' && r.path === '/:id').handler(req, res);
-  assert.equal(res.statusCode, 200); assert.match(loaded.statements[0].sql, /address = \?/);
-  assert.equal(loaded.statements[0].values[0], '');
+  assert.equal(res.statusCode, 200); const stmt = loaded.statements.find(s => s.sql) || loaded.statements[0]; assert.match(stmt.sql, /address = \?/);
+  assert.equal((loaded.statements.find(s => s.sql) || loaded.statements[0]).values[0], '');
 });
 test('legacy single-segment appointment aliases cannot bypass ownership checks', async () => {
   for (const method of ['GET', 'PUT', 'DELETE']) {

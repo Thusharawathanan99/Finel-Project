@@ -211,6 +211,47 @@ function loadComponentPrefix(p, componentName, handlers, initialStates, override
       assert.equal(saved.medications[0].instructions, '');
     });
 
+    await test(app + ': selected images retain MIME and bytes in analysis requests', async () => {
+      const cases = [
+        ['image/png', 'iVBORw0KGgo=', 'data:image/png;base64,iVBORw0KGgo='],
+        ['image/webp', 'UklGRgAAAABXRUJQ', 'data:image/webp;base64,UklGRgAAAABXRUJQ'],
+        ['image/jpeg', '/9j/2Q==', 'data:image/jpeg;base64,/9j/2Q=='],
+        [undefined, '/9j/2Q==', 'data:image/jpeg;base64,/9j/2Q=='],
+        ['image/jpeg', 'data:image/png;base64,iVBORw0KGgo=', 'data:image/png;base64,iVBORw0KGgo='],
+      ];
+      for (const [mimeType, base64, expected] of cases) {
+        let request;
+        const component = loadComponentPrefix(app + '/src/screens/UploadRxScreen.js', 'UploadRxScreen', ['handlePickImage'], [], {
+          auth: { currentUser: { displayName: 'Fixture' } },
+          ImagePicker: { launchImageLibraryAsync: async () => ({ canceled: false, assets: [{ uri: 'fixture-image', base64, mimeType }] }) },
+          apiFetch: async (endpoint, options) => { request = { endpoint, options }; return jsonResponse(200, { medications: [] }); },
+        });
+        await component.handlers.handlePickImage();
+        assert.equal(request.endpoint, '/analyze-prescription');
+        assert.equal(request.options.method, 'POST');
+        assert.equal(JSON.parse(request.options.body).image, expected);
+        assert.deepEqual(component.setters[4], ['fixture-image']);
+      }
+    });
+
+    await test(app + ': unreadable image reports an error and allows another selection', async () => {
+      const alerts = []; let requests = 0; let base64 = null;
+      const component = loadComponentPrefix(app + '/src/screens/UploadRxScreen.js', 'UploadRxScreen', ['handlePickImage'], [], {
+        auth: { currentUser: { displayName: 'Fixture' } },
+        Alert: { alert: (...args) => alerts.push(args) },
+        ImagePicker: { launchImageLibraryAsync: async () => ({ canceled: false, assets: [{ uri: 'fixture-image', base64, mimeType: 'image/png' }] }) },
+        apiFetch: async () => { requests++; return jsonResponse(200, { medications: [] }); },
+      });
+      await component.handlers.handlePickImage();
+      assert.equal(requests, 0);
+      assert.equal(alerts[0][0], 'Upload Failed');
+      assert.match(alerts[0][1], /Could not read.*choose it again/);
+      assert.deepEqual(component.setters[4], []);
+      base64 = 'iVBORw0KGgo=';
+      await component.handlers.handlePickImage();
+      assert.equal(requests, 1);
+    });
+
     await test(app + ': selecting another image during analysis cannot replace the current image', async () => {
       const pending = deferred(); let picks = 0;
       const component = loadComponentPrefix(app + '/src/screens/UploadRxScreen.js', 'UploadRxScreen', ['handlePickImage'], [], {
@@ -234,6 +275,30 @@ function loadComponentPrefix(p, componentName, handlers, initialStates, override
       await api.apiFetch('/residents', { headers: { Authorization: 'stale-token' } });
       assert.equal(observed[0], 'https://fixture.invalid/custom-api/residents');
       assert.equal(observed[1].headers.Authorization, 'Bearer fresh-token');
+    });
+
+    await test(app + ': native window without location sends authenticated prescription analysis', async () => {
+      let observed;
+      const body = JSON.stringify({ image: 'fixture-image-base64' });
+      const auth = { currentUser: { uid: 'A', getIdToken: async () => 'fresh-token' } };
+      const api = loadModule(app + '/src/apiHelper.js', { auth, window: {}, fetch: async (...args) => { observed = args; return jsonResponse(200, {}); } });
+      await api.apiFetch('/analyze-prescription', { method: 'POST', body });
+      assert.equal(observed[0], 'https://fixture.invalid/custom-api/analyze-prescription');
+      assert.equal(observed[1].method, 'POST');
+      assert.equal(observed[1].headers.Authorization, 'Bearer fresh-token');
+      assert.equal(observed[1].headers['Content-Type'], 'application/json');
+      assert.equal(observed[1].body, body);
+    });
+
+    await test(app + ': localhost browsers retain local prescription API routing', async () => {
+      for (const hostname of ['localhost', '127.0.0.1']) {
+        let observed;
+        const auth = { currentUser: { uid: 'A', getIdToken: async () => 'fresh-token' } };
+        const api = loadModule(app + '/src/apiHelper.js', { auth, window: { location: { hostname } }, fetch: async (...args) => { observed = args; return jsonResponse(200, {}); } });
+        await api.apiFetch('/analyze-prescription', { method: 'POST', body: JSON.stringify({ image: 'fixture-image-base64' }) });
+        assert.equal(observed[0], 'http://localhost:3001/api/analyze-prescription');
+        assert.equal(observed[1].headers.Authorization, 'Bearer fresh-token');
+      }
     });
 
     await test(app + ': login never creates or changes profiles after HTTP 500', async () => {

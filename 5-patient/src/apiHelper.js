@@ -4,6 +4,11 @@ const configuredApiUrl = typeof process !== 'undefined' ? process.env.EXPO_PUBLI
 export const API_BASE = configuredApiUrl ? configuredApiUrl.replace(/\/+$/, '') : '';
 
 export function getApiBase() {
+  // React Native defines window, but has no browser location.
+  const hostname = typeof window !== 'undefined' && window.location ? window.location.hostname : undefined;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return 'http://localhost:3001/api';
+  }
   if (!API_BASE) throw new Error('The mobile API URL is not configured. Set EXPO_PUBLIC_API_URL in the app .env file.');
   return API_BASE;
 }

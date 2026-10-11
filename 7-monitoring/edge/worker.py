@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 from . import VERSION
@@ -101,12 +102,21 @@ def main(argv=None):
     next_config = next_health = next_sync = next_infer = reconnect_at = 0.0
     last_sample = None; opened_at = 0.0; config_signature = None; previous_allowed = False
     last_unknown = -float("inf")
+    executor = ThreadPoolExecutor(max_workers=2)
+    config_future = None
+    flush_future = None
+    health_future = None
     try:
         while not stopped:
             now = time.monotonic()
-            if now >= next_config:
+            if now >= next_config and config_future is None:
+                config_future = executor.submit(api.request, "/config")
+                next_config = now + 5
+
+            if config_future and config_future.done():
                 try:
-                    gate.update(api.request("/config"), time.monotonic())
+                    cfg = config_future.result()
+                    gate.update(cfg, time.monotonic())
                     signature = (gate.config.get("configVersion"), repr(gate.config["settings"]), repr(gate.config["residents"]), repr(gate.config["zones"]))
                     if signature != config_signature:
                         engine = ActivityEngine(gate.config["settings"], classifier); tracker = Tracker()
@@ -114,7 +124,8 @@ def main(argv=None):
                 except (ApiError, ValueError):
                     gate.invalidate()
                 camera.update_lease(gate.expires_at)
-                next_config = time.monotonic()+5
+                config_future = None
+
             now = time.monotonic(); allowed = gate.can_capture(now)
             if allowed != previous_allowed:
                 LOG.info("Camera processing %s", "active (fresh consent)" if allowed else "paused or stopped (no active consent lease)")
@@ -161,19 +172,37 @@ def main(argv=None):
                     reconnect_at = now+5
                     LOG.warning("Camera unavailable; reconnect scheduled")
             now = time.monotonic()
-            if now >= next_sync:
-                flush(api, queue, gate, now); camera.update_lease(gate.expires_at)
-                next_sync = time.monotonic()+1
-            if now >= next_health:
+            if now >= next_sync and flush_future is None:
+                flush_future = executor.submit(flush, api, queue, gate, now)
+                next_sync = now + 1
+
+            if flush_future and flush_future.done():
                 try:
-                    api.request("/health", health(bool(allowed and last_sample is not None and now-last_sample < 4), queue.depth()))
+                    flush_future.result()
+                    camera.update_lease(gate.expires_at)
+                except Exception:
+                    pass
+                flush_future = None
+
+            if now >= next_health and health_future is None:
+                health_payload = health(bool(allowed and last_sample is not None and now-last_sample < 4), queue.depth())
+                health_future = executor.submit(api.request, "/health", health_payload)
+                next_health = now + 15
+
+            if health_future and health_future.done():
+                try:
+                    health_future.result()
                 except ApiError as error:
                     if error.status in {401, 403}:
                         gate.invalidate(); camera.update_lease(0)
-                next_health = time.monotonic()+15
+                except Exception:
+                    pass
+                health_future = None
+
             queue.prune()
             time.sleep(0.03)
     finally:
+        executor.shutdown(wait=False)
         camera.stop(); detector.close(); queue.close()
     return 0
 

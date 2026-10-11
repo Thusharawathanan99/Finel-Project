@@ -37,7 +37,7 @@ function canImportPython(pythonCommand, pythonArgs = []) {
   const result = spawnSync(pythonCommand, [...pythonArgs, '-c', 'import fastapi, torch, transformers'], {
     stdio: 'ignore',
     windowsHide: true,
-    timeout: 5000,
+    timeout: 15000,
   });
   return result.status === 0;
 }
@@ -46,6 +46,10 @@ function resolveDonutCommand() {
   const virtualEnvPython = path.join(ROOT_DIR, '.venv', isWindows ? 'Scripts\\python.exe' : 'bin/python');
   if (fs.existsSync(virtualEnvPython) && canImportPython(virtualEnvPython)) {
     return { cmd: virtualEnvPython, args: ['donut_server.py'] };
+  }
+  const python314 = 'C:\\Python314\\python.exe';
+  if (fs.existsSync(python314) && canImportPython(python314)) {
+    return { cmd: python314, args: ['donut_server.py'] };
   }
   if (isWindows && canImportPython('py.exe', ['-3.11'])) {
     return { cmd: 'py.exe', args: ['-3.11', 'donut_server.py'] };

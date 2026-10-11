@@ -75,7 +75,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-careconnect}
       FIREBASE_SERVICE_ACCOUNT_KEY: /run/secrets/firebase_service_account
       GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
       GOOGLE_CLOUD_PROJECT_ID: ${GOOGLE_CLOUD_PROJECT_ID:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
       CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS to the deployed web origin(s)}
@@ -130,14 +130,20 @@ services:
   # ── 4. Admin Web App Frontend ─────────────────
   frontend:
     build:
-      context: ./1-ui-ux
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: 1-ui-ux/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_STORAGE_BUCKET: ${VITE_FIREBASE_STORAGE_BUCKET:-}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
     container_name: careconnect_frontend
     restart: unless-stopped
     ports:
       - "80:80"
-    environment:
-      VITE_API_BASE_URL: http://api:3001
     depends_on:
       api:
         condition: service_healthy

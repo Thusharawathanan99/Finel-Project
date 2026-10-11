@@ -1,3 +1,22 @@
 @import './fonts.css';
 @import './tailwind.css';
 @import './theme.css';
+
+/* Prevent blinking text edit cursor / caret appearing when clicking on dashboard text */
+*:not(input):not(textarea):not([contenteditable="true"]) {
+  caret-color: transparent !important;
+}
+
+.care-dashboard {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Ensure inputs and textareas in forms/modals remain normal and editable */
+input,
+textarea,
+[contenteditable="true"] {
+  caret-color: auto !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}

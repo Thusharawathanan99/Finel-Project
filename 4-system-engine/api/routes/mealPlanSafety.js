@@ -10,7 +10,7 @@ export function normalizeMealContext(input) {
   const medications = input.medications.map(m => {
     const name = text(m?.name || m?.drugName);
     if (!name) throw new Error('Each medication needs a name.');
-    return {name, dosage: text(m.dosage), frequency: text(m.frequency)};
+    return {name, dosage: text(m.dosage), frequency: text(m.frequency), instructions: text(m.instructions), route: text(m.route)};
   });
   const calorieTarget = input.calorieTarget === undefined ? 2000 : input.calorieTarget;
   if (typeof calorieTarget !== 'number' || !Number.isFinite(calorieTarget) || calorieTarget <= 0 || calorieTarget > 10000) throw new Error('Calorie target must be a positive number.');
@@ -23,7 +23,7 @@ export function mealPlanFingerprint(input) {
   const normalize = value => value.toLowerCase().replace(/\s+/g, ' ').trim();
   // Compare all relevant inputs, including same-count regimen changes. No count-only fallback.
   return JSON.stringify({version: 1, residentId: c.residentId, age: c.age,
-    medications: c.medications.map(m => [normalize(m.name), normalize(m.dosage), normalize(m.frequency)]).sort(),
+    medications: c.medications.map(m => [normalize(m.name), normalize(m.dosage), normalize(m.frequency), normalize(m.instructions || ''), normalize(m.route || '')]).sort(),
     allergies: c.allergies.map(normalize).sort(), medicalHistory: normalize(c.medicalHistory), dietaryRestrictions: c.dietaryRestrictions.map(normalize).sort(), calorieTarget: c.calorieTarget});
 }
 const ALLERGENS = {

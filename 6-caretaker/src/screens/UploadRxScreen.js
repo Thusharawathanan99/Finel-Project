@@ -79,10 +79,17 @@ const UploadRxScreen = ({ route, navigation }) => {
     }
 
     if (mountedRef.current && !result.canceled) {
-      setImageUri(result.assets[0].uri);
-      setImageBase64(result.assets[0].base64);
+      const asset = result.assets?.[0];
+      if (typeof asset?.base64 !== 'string' || !asset.base64.trim()) {
+        throw new Error('Could not read the selected image. Please choose it again.');
+      }
+      const imageData = asset.base64.startsWith('data:')
+        ? asset.base64
+        : `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}`;
+      setImageUri(asset.uri);
+      setImageBase64(imageData);
       setExtractedData(null);
-      await handleAnalyze(result.assets[0].base64);
+      await handleAnalyze(imageData);
     }
     } catch (error) {
       if (mountedRef.current) Alert.alert('Upload Failed', error.message || 'Could not select the prescription image.');

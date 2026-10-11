@@ -4,7 +4,7 @@ import { User } from '../models/User';
 import { Resident, PersonalDetails } from '../models/Resident';
 import { Caretaker } from '../models/Caretaker';
 import { SystemComponent, SystemStatus } from '../models/SystemComponent';
-import { createCaretakerAccount, getCaretakerPasswordValidationError as getPasswordValidationError } from '../services/firebaseAuthService';
+import { createCaretakerAccount, createResidentAccount, formatAuthErrorMessage, getCaretakerPasswordValidationError as getPasswordValidationError } from '../services/firebaseAuthService';
 import { caretakersApi, sosApi, residentsApi, systemApi } from '../services/apiService';
 import { PersistedCareAlerts } from './PersistedCareAlerts';
 import { MonitoringDevices } from './monitoring/MonitoringDevices';
@@ -26,7 +26,9 @@ import {
   UserPlus,
   Trash2,
   Eye,
-  EyeOff
+  EyeOff,
+  CheckCircle2,
+  Mail
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -44,6 +46,38 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
   const [selectedLeaveRequest, setSelectedLeaveRequest] = useState<any>(null);
   const [sosAlerts, setSosAlerts] = useState<any[]>([]);
   const [operationError, setOperationError] = useState('');
+  const [operationSuccess, setOperationSuccess] = useState('');
+  const [notification, setNotification] = useState<{
+    id: string;
+    type: 'success' | 'error' | 'info';
+    title: string;
+    message: string;
+  } | null>(null);
+
+  const showNotification = (title: string, message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setNotification({ id: String(Date.now()), type, title, message });
+    if (type === 'success') {
+      setOperationSuccess(message);
+      setOperationError('');
+    }
+  };
+
+  useEffect(() => {
+    if (!notification) return;
+    const timer = setTimeout(() => {
+      setNotification(null);
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [notification]);
+
+  useEffect(() => {
+    if (!operationSuccess) return;
+    const timer = setTimeout(() => {
+      setOperationSuccess('');
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [operationSuccess]);
+
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const changeInProgress = useRef(false);
 
@@ -52,10 +86,11 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     changeInProgress.current = true;
     setPendingAction(action);
     setOperationError('');
+    setOperationSuccess('');
     try {
       await change();
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Change could not be saved. Please try again.');
+      setOperationError(formatAuthErrorMessage(error));
     } finally {
       changeInProgress.current = false;
       setPendingAction(null);
@@ -70,6 +105,8 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
 
   const [residentForm, setResidentForm] = useState<{
     name: string;
+    email: string;
+    password: string;
     age: string;
     roomNumber: string;
     floorNumber: string;
@@ -80,8 +117,11 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     emergencyContactName: string;
     emergencyContactPhone: string;
     emergencyContactRelation: string;
+    caretakerId: string;
   }>({
     name: '',
+    email: '',
+    password: '',
     age: '',
     roomNumber: '',
     floorNumber: '',
@@ -91,7 +131,8 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     zipCode: '',
     emergencyContactName: '',
     emergencyContactPhone: '',
-    emergencyContactRelation: ''
+    emergencyContactRelation: '',
+    caretakerId: ''
   });
 
   const [caretakerForm, setCaretakerForm] = useState({
@@ -114,6 +155,54 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
   const [replacementCaretaker, setReplacementCaretaker] = useState('');
   const [loadErrors, setLoadErrors] = useState<Record<string,string>>({});
   const [showCaretakerPassword, setShowCaretakerPassword] = useState(false);
+  const [residentFormError, setResidentFormError] = useState('');
+  const [residentSubmitting, setResidentSubmitting] = useState(false);
+  const [showResidentPassword, setShowResidentPassword] = useState(false);
+  const [residentForAccount, setResidentForAccount] = useState<Resident | null>(null);
+  const [accountModalEmail, setAccountModalEmail] = useState('');
+  const [accountModalPassword, setAccountModalPassword] = useState('');
+  const [accountModalError, setAccountModalError] = useState('');
+  const [accountModalSubmitting, setAccountModalSubmitting] = useState(false);
+  const [showAccountPassword, setShowAccountPassword] = useState(false);
+
+  const closeResidentModal = () => {
+    setShowAddResident(false);
+    setResidentForm({
+      name: '',
+      email: '',
+      password: '',
+      age: '',
+      roomNumber: '',
+      floorNumber: '',
+      address: '',
+      city: '',
+      state: '',
+      zipCode: '',
+      emergencyContactName: '',
+      emergencyContactPhone: '',
+      emergencyContactRelation: '',
+      caretakerId: ''
+    });
+    setResidentFormError('');
+    setResidentSubmitting(false);
+    setShowResidentPassword(false);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (showAddResident && !residentSubmitting) closeResidentModal();
+        if (residentForAccount && !accountModalSubmitting) setResidentForAccount(null);
+        if (showAddCaretaker && !caretakerSubmitting) closeCaretakerModal();
+        if (showAddSystem) setShowAddSystem(false);
+      }
+    };
+    if (showAddResident || showAddCaretaker || showAddSystem || residentForAccount) {
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }
+  }, [showAddResident, showAddCaretaker, showAddSystem, caretakerSubmitting, residentSubmitting, residentForAccount, accountModalSubmitting]);
+
   const recordsActive = useRef(true);
   const refreshRecords = async () => {
     const feeds = [{key:'emergencies',fetch:sosApi.getActive,publish:setSosAlerts}];
@@ -140,32 +229,130 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     try {
       await sosApi.resolve(alertId, user.name);
       setSosAlerts(prev => prev.filter(a => a.id !== alertId));
+      showNotification('SOS Alert Resolved', 'The emergency SOS alert was resolved successfully.');
     } catch (err) {
       setOperationError('Failed to resolve SOS alert. Please retry.');
     } finally {changeInProgress.current=false;setPendingAction(null);}
   };
 
   const handleAddResident = () => runChange('resident', async () => {
-    if (!residentForm.name.trim() || !residentForm.age.trim() || !Number.isInteger(Number(residentForm.age)) || Number(residentForm.age) < 0 || Number(residentForm.age) > 120) throw new Error('Enter a name and a whole-number age between 0 and 120.');
+    setResidentFormError('');
+    if (!residentForm.name.trim() || !residentForm.age.trim() || !Number.isInteger(Number(residentForm.age)) || Number(residentForm.age) < 0 || Number(residentForm.age) > 120) {
+      const err = 'Enter a name and a whole-number age between 0 and 120.';
+      setResidentFormError(err);
+      throw new Error(err);
+    }
     const age = Number(residentForm.age);
     const admissionDate = new Date().toISOString().split('T')[0];
-    const response = await residentsApi.create({ ...residentForm, name: residentForm.name.trim(), age, admissionDate });
-    const resident = new Resident(response.residentId, residentForm.name.trim(), age);
+    const residentName = residentForm.name.trim();
+    const email = residentForm.email?.trim().toLowerCase();
+    let residentId: string;
+    if (email) {
+      const passwordError = getPasswordValidationError(residentForm.password || '');
+      if (passwordError) {
+        setResidentFormError(passwordError);
+        throw new Error(passwordError);
+      }
+      setResidentSubmitting(true);
+      try {
+        const created = await createResidentAccount({
+          name: residentName,
+          email,
+          password: residentForm.password || '',
+          age,
+          roomNumber: residentForm.roomNumber,
+          floorNumber: residentForm.floorNumber,
+          address: residentForm.address,
+          city: residentForm.city,
+          state: residentForm.state,
+          zipCode: residentForm.zipCode,
+          emergencyContactName: residentForm.emergencyContactName,
+          emergencyContactPhone: residentForm.emergencyContactPhone,
+          emergencyContactRelation: residentForm.emergencyContactRelation,
+          caretakerId: residentForm.caretakerId || undefined,
+        });
+        residentId = created.residentId;
+      } catch (err: any) {
+        const message = formatAuthErrorMessage(err);
+        setResidentFormError(message);
+        throw new Error(message);
+      } finally {
+        setResidentSubmitting(false);
+      }
+    } else {
+      const response = await residentsApi.create({ ...residentForm, name: residentName, age, admissionDate });
+      residentId = response.residentId;
+    }
+    const resident = new Resident(residentId, residentName, age);
+    if (email) resident.accountEmail = email;
     resident.updatePersonalDetails({ ...residentForm, admissionDate: new Date(`${admissionDate}T00:00:00`) });
     dashboard.addResident(resident);
-    setShowAddResident(false);
-    setResidentForm({ name: '', age: '', roomNumber: '', floorNumber: '', address: '', city: '', state: '', zipCode: '', emergencyContactName: '', emergencyContactPhone: '', emergencyContactRelation: '' });
+    if (residentForm.caretakerId) {
+      const ct = dashboard.getCaretaker(residentForm.caretakerId);
+      if (ct && !ct.assignedResidents.includes(residentId)) {
+        ct.assignedResidents.push(residentId);
+      }
+    }
+    closeResidentModal();
     onRefresh();
+    showNotification(
+      email ? 'Resident Account Created Successfully!' : 'Resident Registered Successfully!',
+      email
+        ? `Resident "${residentName}" login account created (${email}). They can now sign in to the Patient Mobile App.`
+        : `Resident "${residentName}" has been registered successfully and stored in the database.`
+    );
   });
 
+  const handleCreateAccountForExistingResident = async () => {
+    if (!residentForAccount) return;
+    setAccountModalError('');
+    const email = accountModalEmail.trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setAccountModalError('Please enter a valid email address.');
+      return;
+    }
+    const passwordError = getPasswordValidationError(accountModalPassword);
+    if (passwordError) {
+      setAccountModalError(passwordError);
+      return;
+    }
+    setAccountModalSubmitting(true);
+    try {
+      await createResidentAccount({
+        name: residentForAccount.name,
+        email,
+        password: accountModalPassword,
+        residentId: residentForAccount.residentId,
+      });
+      residentForAccount.accountEmail = email;
+      const targetName = residentForAccount.name;
+      setResidentForAccount(null);
+      setAccountModalEmail('');
+      setAccountModalPassword('');
+      setShowAccountPassword(false);
+      onRefresh();
+      showNotification(
+        'Login Account Created!',
+        `Login account created for ${targetName} (${email}). They can now sign in to the Patient Mobile App.`
+      );
+    } catch (err: any) {
+      setAccountModalError(formatAuthErrorMessage(err));
+    } finally {
+      setAccountModalSubmitting(false);
+    }
+  };
+
   const handleRemoveResident = (residentId: string) => {
-    if (!confirm('Are you sure you want to remove this resident?')) return;
+    const resident = dashboard.getResident(residentId);
+    const residentName = resident ? resident.name : 'Resident';
+    if (!confirm(`Are you sure you want to remove ${residentName}?`)) return;
     void runChange(`resident:${residentId}`, async () => {
       await residentsApi.delete(residentId);
       dashboard.removeResident(residentId);
       dashboard.caretakers.forEach(c => { c.assignedResidents = c.assignedResidents.filter(id => id !== residentId); });
       dashboard.appointments = dashboard.appointments.filter(a => a.residentId !== residentId);
       onRefresh();
+      showNotification('Resident Removed', `Resident "${residentName}" was removed from the system.`, 'info');
     });
   };
 
@@ -190,17 +377,19 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     setCaretakerSubmitting(true);
 
     try {
+      const caretakerName = caretakerForm.name.trim();
       const created = await createCaretakerAccount({
-        name: caretakerForm.name,
+        name: caretakerName,
         email: caretakerForm.email,
         password: caretakerForm.password,
         phone: caretakerForm.phone,
         specialization: caretakerForm.specialization,
       });
+      const caretakerId = created.caretakerId;
 
       const caretaker = new Caretaker(
-        created.caretakerId,
-        caretakerForm.name,
+        caretakerId,
+        caretakerName,
         caretakerForm.email,
         caretakerForm.phone,
         caretakerForm.specialization
@@ -208,8 +397,12 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       dashboard.addCaretaker(caretaker);
       closeCaretakerModal();
       onRefresh();
+      showNotification(
+        'Caretaker Registered Successfully!',
+        `Caretaker "${caretakerName}" has been registered successfully and stored in the database.`
+      );
     } catch (error: any) {
-      setCaretakerFormError(error?.message || 'Failed to create caretaker account.');
+      setCaretakerFormError(formatAuthErrorMessage(error));
     } finally {
       changeInProgress.current=false;setPendingAction(null);
       setCaretakerSubmitting(false);
@@ -223,22 +416,30 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
   };
 
   const handleRemoveCaretaker = (caretakerId: string) => {
-    if (!confirm('Are you sure you want to remove this caretaker?')) return;
+    const caretaker = dashboard.getCaretaker(caretakerId);
+    const caretakerName = caretaker ? caretaker.name : 'Caretaker';
+    if (!confirm(`Are you sure you want to remove ${caretakerName}?`)) return;
     void runChange(`caretaker:${caretakerId}`, async () => {
       await caretakersApi.delete(caretakerId);
       dashboard.removeCaretaker(caretakerId);
       onRefresh();
+      showNotification('Caretaker Removed', `Caretaker "${caretakerName}" was removed from the system.`, 'info');
     });
   };
 
   const handleAddSystem = () => runChange('system', async () => {
     if (!systemForm.name.trim()) throw new Error('System name is required.');
+    const componentName = systemForm.name.trim();
     const componentId = `SYS-${Date.now()}`;
-    await systemApi.createComponent({ componentId, ...systemForm, name: systemForm.name.trim() });
-    dashboard.addSystemComponent(new SystemComponent(componentId, systemForm.name.trim(), systemForm.version, systemForm.description, systemForm.status));
+    await systemApi.createComponent({ componentId, ...systemForm, name: componentName });
+    dashboard.addSystemComponent(new SystemComponent(componentId, componentName, systemForm.version, systemForm.description, systemForm.status));
     setShowAddSystem(false);
     setSystemForm({ name: '', version: '', description: '', status: 'online' });
     onRefresh();
+    showNotification(
+      'System Component Added Successfully!',
+      `Component "${componentName}" (${systemForm.version || 'v1.0.0'}) has been added and saved.`
+    );
   });
 
   const handleToggleSystemStatus = (componentId: string, currentStatus: SystemStatus) => runChange(`system:${componentId}`, async () => {
@@ -248,14 +449,21 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     await systemApi.updateComponent(componentId, { status });
     component.setStatus(status);
     onRefresh();
+    showNotification(
+      'System Status Updated',
+      `Component "${component.name}" status changed to ${status.toUpperCase()}.`
+    );
   });
 
   const handleRemoveSystem = (componentId: string) => {
-    if (!confirm('Remove this system component?')) return;
+    const component = dashboard.getSystemComponent(componentId);
+    const compName = component ? component.name : 'Component';
+    if (!confirm(`Remove ${compName}?`)) return;
     void runChange(`system:${componentId}`, async () => {
       await systemApi.deleteComponent(componentId);
       dashboard.removeSystemComponent(componentId);
       onRefresh();
+      showNotification('Component Removed', `System component "${compName}" was removed.`, 'info');
     });
   };
 
@@ -269,6 +477,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
         setSelectedLeaveRequest(null);
         setReplacementCaretaker('');
         onRefresh();
+        showNotification('Leave Request Approved', `Leave for ${request.caretakerName || 'caretaker'} was approved.`);
   });
 
   const handleRejectLeave = (request: any) => runChange(`leave:${request.requestId}`, async () => {
@@ -279,6 +488,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       request.reject(user.name);
       setSelectedLeaveRequest(null);
       onRefresh();
+      showNotification('Leave Request Rejected', `Leave for ${request.caretakerName || 'caretaker'} was rejected.`, 'info');
   });
 
   const handleAcknowledgeEmergency = (alertId: string) => {
@@ -286,12 +496,84 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
     if (alert) {
       alert.acknowledge(user.name);
       onRefresh();
+      showNotification('Emergency Acknowledged', 'Emergency alert has been acknowledged.');
     }
   };
 
   return (
     <div className="care-dashboard min-h-screen pb-28">
+      {/* Toast Notification Banner */}
+      {notification && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-5 left-4 right-4 sm:left-auto sm:right-5 sm:max-w-md z-[100] animate-in fade-in slide-in-from-top-4 duration-300 pointer-events-auto"
+        >
+          <div
+            className={`flex items-start gap-3 p-4 rounded-2xl shadow-2xl border transition-all ${
+              notification.type === 'success'
+                ? 'bg-emerald-50/95 border-emerald-300 text-emerald-950 backdrop-blur-md'
+                : notification.type === 'error'
+                ? 'bg-rose-50/95 border-rose-300 text-rose-950 backdrop-blur-md'
+                : 'bg-teal-50/95 border-teal-300 text-teal-950 backdrop-blur-md'
+            }`}
+          >
+            <div
+              className={`p-2 rounded-xl shrink-0 ${
+                notification.type === 'success'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : notification.type === 'error'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-teal-600 text-white shadow-sm'
+              }`}
+            >
+              {notification.type === 'success' ? (
+                <CheckCircle2 className="w-5 h-5" />
+              ) : notification.type === 'error' ? (
+                <AlertTriangle className="w-5 h-5" />
+              ) : (
+                <Shield className="w-5 h-5" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0 pt-0.5">
+              <h4 className="text-sm font-bold tracking-tight text-gray-900">
+                {notification.title}
+              </h4>
+              <p className="text-xs mt-1 text-gray-700 leading-relaxed break-words font-medium">
+                {notification.message}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setNotification(null)}
+              className="p-1 rounded-lg hover:bg-black/10 text-gray-500 hover:text-gray-800 transition-colors"
+              aria-label="Dismiss notification"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {operationError && <div role="alert" className="fixed bottom-28 left-4 right-4 z-[60] rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{operationError}<button className="ml-3 underline" onClick={() => setOperationError('')}>Dismiss</button></div>}
+      {operationSuccess && (
+        <div
+          role="status"
+          className="fixed bottom-28 left-4 right-4 z-[65] rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-950 shadow-xl flex items-center justify-between animate-in fade-in slide-in-from-bottom-2 duration-300"
+        >
+          <div className="flex items-center gap-2.5">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+            <span className="font-semibold text-emerald-950">{operationSuccess}</span>
+          </div>
+          <button
+            type="button"
+            className="ml-3 underline text-emerald-800 hover:text-emerald-950 text-xs font-bold shrink-0"
+            onClick={() => setOperationSuccess('')}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="care-dashboard-header bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
         <div className="px-3 py-2.5">
@@ -368,29 +650,29 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
         {activeView === 'overview' && (
           <div className="space-y-3">
             {/* Stats Grid */}
-            <div className="grid grid-cols-2 gap-2">
-              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
-                <Users className="w-6 h-6 text-teal-500 mb-1" />
-                <p className="text-xl font-bold text-gray-800">{dashboard.residents.length}</p>
-                <p className="text-xs text-gray-600">Residents</p>
+            <div className="grid grid-cols-2 gap-2 select-none">
+              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200 select-none cursor-default hover:border-gray-300 transition-colors">
+                <Users className="w-6 h-6 text-teal-500 mb-1 pointer-events-none" />
+                <p className="text-xl font-bold text-gray-800 select-none cursor-default">{dashboard.residents.length}</p>
+                <p className="text-xs text-gray-600 select-none cursor-default">Residents</p>
               </div>
 
-              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
-                <Users className="w-6 h-6 text-green-500 mb-1" />
-                <p className="text-xl font-bold text-gray-800">{dashboard.caretakers.length}</p><p className="text-xs text-gray-500">{dashboard.caretakers.filter(c => c.isActive).length} active · {dashboard.caretakers.filter(c => !c.isActive).length} inactive</p>
-                <p className="text-xs text-gray-600">Caretakers</p>
+              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200 select-none cursor-default hover:border-gray-300 transition-colors">
+                <Users className="w-6 h-6 text-green-500 mb-1 pointer-events-none" />
+                <p className="text-xl font-bold text-gray-800 select-none cursor-default">{dashboard.caretakers.length}</p><p className="text-xs text-gray-500 select-none cursor-default">{dashboard.caretakers.filter(c => c.isActive).length} active · {dashboard.caretakers.filter(c => !c.isActive).length} inactive</p>
+                <p className="text-xs text-gray-600 select-none cursor-default">Caretakers</p>
               </div>
 
-              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
-                <Activity className="w-6 h-6 text-purple-500 mb-1" />
-                <p className="text-xl font-bold text-gray-800">{avgWellness}</p>
-                <p className="text-xs text-gray-600">Avg Wellness</p>
+              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200 select-none cursor-default hover:border-gray-300 transition-colors">
+                <Activity className="w-6 h-6 text-purple-500 mb-1 pointer-events-none" />
+                <p className="text-xl font-bold text-gray-800 select-none cursor-default">{avgWellness}</p>
+                <p className="text-xs text-gray-600 select-none cursor-default">Avg Wellness</p>
               </div>
 
-              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
-                <Bell className="w-6 h-6 text-orange-500 mb-1" />
-                <p className="text-xl font-bold text-gray-800">{criticalAlerts.length}</p>
-                <p className="text-xs text-gray-600">Critical Alerts</p>
+              <div className="bg-white rounded-lg p-3 shadow-sm border border-gray-200 select-none cursor-default hover:border-gray-300 transition-colors">
+                <Bell className="w-6 h-6 text-orange-500 mb-1 pointer-events-none" />
+                <p className="text-xl font-bold text-gray-800 select-none cursor-default">{criticalAlerts.length}</p>
+                <p className="text-xs text-gray-600 select-none cursor-default">Critical Alerts</p>
               </div>
             </div>
 
@@ -500,9 +782,35 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                   <div key={resident.residentId} className="bg-white rounded-lg p-3 shadow-sm border border-gray-200">
                     <div className="flex items-start justify-between mb-2">
                       <div>
-                        <h3 className="font-semibold text-gray-800 text-sm">{resident.name}</h3>
-                        <p className="text-xs text-gray-600">
-                          Age {resident.age} • Room {resident.personalDetails.roomNumber}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="font-semibold text-gray-800 text-sm">{resident.name}</h3>
+                          {resident.accountEmail ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] bg-teal-50 text-teal-700 px-2 py-0.5 rounded-full font-medium border border-teal-200">
+                              <Mail className="w-3 h-3 text-teal-600" />
+                              {resident.accountEmail}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[11px] bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full font-medium border border-amber-200">
+                              No Login Account
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-600 mt-0.5">
+                          Age {resident.age} • Room {resident.personalDetails.roomNumber || '—'}
+                          {!resident.accountEmail && (
+                            <button
+                              onClick={() => {
+                                setResidentForAccount(resident);
+                                setAccountModalEmail('');
+                                setAccountModalPassword('');
+                                setAccountModalError('');
+                                setShowAccountPassword(false);
+                              }}
+                              className="ml-2 text-teal-600 hover:text-teal-800 underline font-medium"
+                            >
+                              + Create Login Account
+                            </button>
+                          )}
                         </p>
                       </div>
                       <button
@@ -823,29 +1131,102 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
 
       {/* Modals */}
       {showAddResident && (
-        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-resident-dialog-title"
+          className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50"
+          onClick={(e) => { if (e.target === e.currentTarget && !residentSubmitting) closeResidentModal(); }}
+        >
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-teal-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
-              <h3 className="font-semibold text-base">Add New Resident</h3>
-              <button onClick={() => setShowAddResident(false)} className="p-1">
+              <h3 id="add-resident-dialog-title" className="font-semibold text-base">Add New Resident</h3>
+              <button onClick={closeResidentModal} aria-label="Close add resident dialog" className="p-1" disabled={residentSubmitting}>
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="p-4 space-y-3">
+              {residentFormError && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                  {residentFormError}
+                </div>
+              )}
+
               <input
                 type="text"
-                placeholder="Full Name"
+                placeholder="Full Name *"
                 value={residentForm.name}
                 onChange={(e) => setResidentForm({ ...residentForm, name: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
+
+              {/* Login Account Section */}
+              <div className="p-3 bg-teal-50/70 border border-teal-200 rounded-lg space-y-2.5">
+                <div className="flex items-center gap-1.5 text-teal-800 text-xs font-semibold">
+                  <Mail className="w-3.5 h-3.5 text-teal-600" />
+                  <span>Resident Login Credentials (Patient Mobile App)</span>
+                </div>
+                <input
+                  type="email"
+                  placeholder="Login Email Address *"
+                  value={residentForm.email}
+                  onChange={(e) => setResidentForm({ ...residentForm, email: e.target.value })}
+                  className="w-full px-3 py-2 text-sm border bg-white rounded-lg"
+                  disabled={residentSubmitting}
+                />
+                <div className="relative">
+                  <input
+                    type={showResidentPassword ? 'text' : 'password'}
+                    placeholder="Temporary Password (min 6 characters) *"
+                    value={residentForm.password}
+                    onChange={(e) => setResidentForm({ ...residentForm, password: e.target.value })}
+                    className="w-full px-3 py-2 pr-10 text-sm border bg-white rounded-lg"
+                    autoComplete="new-password"
+                    minLength={6}
+                    disabled={residentSubmitting}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResidentPassword((v) => !v)}
+                    className="absolute inset-y-0 right-0 px-3 text-gray-500"
+                    aria-label={showResidentPassword ? 'Hide resident password' : 'Show resident password'}
+                    aria-pressed={showResidentPassword}
+                    disabled={residentSubmitting}
+                  >
+                    {showResidentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-teal-700 leading-tight">
+                  The resident will use this email and password to log in to the Patient Mobile App.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Assign Primary Caretaker</label>
+                <select
+                  value={residentForm.caretakerId}
+                  onChange={(e) => setResidentForm({ ...residentForm, caretakerId: e.target.value })}
+                  className="w-full px-3 py-2 text-sm border rounded-lg bg-white"
+                  disabled={residentSubmitting}
+                >
+                  <option value="">— Unassigned —</option>
+                  {dashboard.caretakers.filter(c => c.isActive).map(c => (
+                    <option key={c.caretakerId} value={c.caretakerId}>
+                      {c.name} ({c.specialization || 'General'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="grid grid-cols-2 gap-2">
                 <input
                   type="number"
-                  placeholder="Age"
+                  placeholder="Age *"
                   value={residentForm.age}
                   onChange={(e) => setResidentForm({ ...residentForm, age: e.target.value })}
                   className="w-full px-3 py-2 text-sm border rounded-lg"
+                  disabled={residentSubmitting}
                 />
                 <input
                   type="text"
@@ -853,6 +1234,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                   value={residentForm.roomNumber}
                   onChange={(e) => setResidentForm({ ...residentForm, roomNumber: e.target.value })}
                   className="w-full px-3 py-2 text-sm border rounded-lg"
+                  disabled={residentSubmitting}
                 />
               </div>
               <input
@@ -861,6 +1243,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 value={residentForm.floorNumber}
                 onChange={(e) => setResidentForm({ ...residentForm, floorNumber: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <input
                 type="text"
@@ -868,6 +1251,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 value={residentForm.address}
                 onChange={(e) => setResidentForm({ ...residentForm, address: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <div className="grid grid-cols-2 gap-2">
                 <input
@@ -876,6 +1260,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                   value={residentForm.city}
                   onChange={(e) => setResidentForm({ ...residentForm, city: e.target.value })}
                   className="w-full px-3 py-2 text-sm border rounded-lg"
+                  disabled={residentSubmitting}
                 />
                 <input
                   type="text"
@@ -883,6 +1268,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                   value={residentForm.state}
                   onChange={(e) => setResidentForm({ ...residentForm, state: e.target.value })}
                   className="w-full px-3 py-2 text-sm border rounded-lg"
+                  disabled={residentSubmitting}
                 />
               </div>
               <input
@@ -891,6 +1277,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 value={residentForm.zipCode}
                 onChange={(e) => setResidentForm({ ...residentForm, zipCode: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <input
                 type="text"
@@ -898,6 +1285,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 value={residentForm.emergencyContactName}
                 onChange={(e) => setResidentForm({ ...residentForm, emergencyContactName: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <input
                 type="tel"
@@ -905,6 +1293,7 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 value={residentForm.emergencyContactPhone}
                 onChange={(e) => setResidentForm({ ...residentForm, emergencyContactPhone: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <input
                 type="text"
@@ -912,20 +1301,124 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
                 value={residentForm.emergencyContactRelation}
                 onChange={(e) => setResidentForm({ ...residentForm, emergencyContactRelation: e.target.value })}
                 className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={residentSubmitting}
               />
               <div className="grid grid-cols-2 gap-2 pt-2">
                 <button
-                  onClick={() => setShowAddResident(false)}
+                  onClick={closeResidentModal}
+                  disabled={residentSubmitting}
                   className="py-2.5 border-2 border-gray-300 text-gray-700 rounded-lg font-medium text-sm"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleAddResident}
-                  disabled={pendingAction !== null || !residentForm.name || !residentForm.age}
-                  className="py-2.5 bg-teal-500 text-white rounded-lg font-medium text-sm disabled:opacity-50"
+                  disabled={pendingAction !== null || residentSubmitting || !residentForm.name || !residentForm.age}
+                  className="py-2.5 bg-teal-500 text-white rounded-lg font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1"
                 >
-                  Add Resident
+                  {residentSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Creating Account...
+                    </>
+                  ) : (
+                    'Add Resident'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Login Account for Existing Resident Modal */}
+      {residentForAccount && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="create-resident-account-dialog-title"
+          className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50"
+          onClick={(e) => { if (e.target === e.currentTarget && !accountModalSubmitting) setResidentForAccount(null); }}
+        >
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
+            <div className="bg-teal-600 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
+              <h3 id="create-resident-account-dialog-title" className="font-semibold text-base">Create Resident Login Account</h3>
+              <button
+                onClick={() => setResidentForAccount(null)}
+                aria-label="Close dialog"
+                className="p-1"
+                disabled={accountModalSubmitting}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="p-2.5 bg-teal-50 border border-teal-200 rounded-lg text-xs text-teal-800">
+                <p className="font-semibold">{residentForAccount.name}</p>
+                <p className="text-[11px] text-teal-600">ID: {residentForAccount.residentId} • Room {residentForAccount.personalDetails.roomNumber || '—'}</p>
+              </div>
+
+              {accountModalError && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                  {accountModalError}
+                </div>
+              )}
+
+              <input
+                type="email"
+                placeholder="Login Email Address *"
+                value={accountModalEmail}
+                onChange={(e) => setAccountModalEmail(e.target.value)}
+                className="w-full px-3 py-2 text-sm border rounded-lg"
+                disabled={accountModalSubmitting}
+              />
+              <div className="relative">
+                <input
+                  type={showAccountPassword ? 'text' : 'password'}
+                  placeholder="Temporary Password (min 6 chars) *"
+                  value={accountModalPassword}
+                  onChange={(e) => setAccountModalPassword(e.target.value)}
+                  className="w-full px-3 py-2 pr-10 text-sm border rounded-lg"
+                  autoComplete="new-password"
+                  minLength={6}
+                  disabled={accountModalSubmitting}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAccountPassword((v) => !v)}
+                  className="absolute inset-y-0 right-0 px-3 text-gray-500"
+                  aria-label={showAccountPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showAccountPassword}
+                  disabled={accountModalSubmitting}
+                >
+                  {showAccountPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">
+                The resident will use this email and password to sign in to the Patient Mobile App.
+              </p>
+
+              <div className="grid grid-cols-2 gap-2 pt-2">
+                <button
+                  onClick={() => setResidentForAccount(null)}
+                  disabled={accountModalSubmitting}
+                  className="py-2.5 border-2 border-gray-300 text-gray-700 rounded-lg font-medium text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreateAccountForExistingResident}
+                  disabled={accountModalSubmitting || !accountModalEmail || !accountModalPassword}
+                  className="py-2.5 bg-teal-600 text-white rounded-lg font-medium text-sm disabled:opacity-50 flex items-center justify-center gap-1"
+                >
+                  {accountModalSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    'Create Account'
+                  )}
                 </button>
               </div>
             </div>
@@ -934,11 +1427,17 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       )}
 
       {showAddCaretaker && (
-        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-caretaker-dialog-title"
+          className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50"
+          onClick={(e) => { if (e.target === e.currentTarget && !caretakerSubmitting) closeCaretakerModal(); }}
+        >
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
             <div className="bg-green-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
-              <h3 className="font-semibold text-base">Add New Caretaker</h3>
-              <button onClick={closeCaretakerModal} className="p-1" disabled={caretakerSubmitting}>
+              <h3 id="add-caretaker-dialog-title" className="font-semibold text-base">Add New Caretaker</h3>
+              <button onClick={closeCaretakerModal} aria-label="Close add caretaker dialog" className="p-1" disabled={caretakerSubmitting}>
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1036,11 +1535,17 @@ export function AdminDashboard({ user, dashboard, onLogout, onRefresh }: AdminDa
       )}
 
       {showAddSystem && (
-        <div className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-system-dialog-title"
+          className="care-modal-overlay fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowAddSystem(false); }}
+        >
           <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md">
             <div className="bg-purple-500 text-white px-4 py-3 flex items-center justify-between rounded-t-2xl">
-              <h3 className="font-semibold text-base">Add System Component</h3>
-              <button onClick={() => setShowAddSystem(false)} className="p-1">
+              <h3 id="add-system-dialog-title" className="font-semibold text-base">Add System Component</h3>
+              <button onClick={() => setShowAddSystem(false)} aria-label="Close add system component dialog" className="p-1">
                 <X className="w-5 h-5" />
               </button>
             </div>

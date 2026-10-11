@@ -43,7 +43,8 @@ log = logging.getLogger("evaluate")
 
 HF_DATASET = "chinmays18/medical-prescription-dataset"
 MODEL_NAME = "chinmays18/medical-prescription-ocr"
-LOCAL_MODEL_PATH = Path(__file__).parent / "models" / "donut-prescription"
+LOCAL_MODEL_PATH_PRIMARY = Path(__file__).parent.parent / "best_model"
+LOCAL_MODEL_PATH_SECONDARY = Path(__file__).parent / "models" / "donut-prescription"
 RESULTS_DIR = Path(__file__).parent / "research"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -63,7 +64,15 @@ class DonutPredictor:
 
     def load(self):
         log.info(f"Loading Donut model on {self.device}...")
-        source = str(LOCAL_MODEL_PATH) if LOCAL_MODEL_PATH.exists() else MODEL_NAME
+        if LOCAL_MODEL_PATH_PRIMARY.exists() and (LOCAL_MODEL_PATH_PRIMARY / "model.safetensors").exists():
+            source = str(LOCAL_MODEL_PATH_PRIMARY)
+            log.info(f"🏆 Found fine-tuned model at: {source}")
+        elif LOCAL_MODEL_PATH_SECONDARY.exists():
+            source = str(LOCAL_MODEL_PATH_SECONDARY)
+            log.info(f"📂 Found cached model at: {source}")
+        else:
+            source = MODEL_NAME
+            log.info(f"☁️ Using remote model: {source}")
         self.processor = DonutProcessor.from_pretrained(source)
         self.model = VisionEncoderDecoderModel.from_pretrained(source)
         self.model.to(self.device)

@@ -2,7 +2,7 @@ import RequestError from '../components/RequestError';
 import {useScreenRefresh} from '../useScreenRefresh';
 import {localDateKey, calendarDateKey, upcomingAppointments} from '../calendar';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Animated, Linking, Alert, Image } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Animated, Linking, Alert, Image, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { auth } from '../firebase/config';
@@ -37,15 +37,48 @@ const DashboardScreen = ({ navigation }) => {
       setPatientName(user.displayName?.split(' ')[0] || 'Patient');
       const residentId = await getResidentId();
       const base='/residents/'+encodeURIComponent(residentId),day=colomboDay();
-      const responses = await Promise.all([base+'/caretakers',base+'/notifications',base+'/appointments',base,base+'/medication-reminders?day='+day,base+'/medication-events?day='+day].map(path => apiFetch(path)));
-      if (responses.some(response => !response.ok)) throw new Error('Care records unavailable');
-      const [care,notices,appointments,details,doses,events] = await Promise.all(responses.map(response => response.json()));
+      const endpoints = [
+        { key: 'care', url: base + '/caretakers' },
+        { key: 'notices', url: base + '/notifications' },
+        { key: 'appointments', url: base + '/appointments' },
+        { key: 'details', url: base },
+        { key: 'doses', url: base + '/medication-reminders?day=' + day },
+        { key: 'events', url: base + '/medication-events?day=' + day }
+      ];
+      const results = await Promise.allSettled(endpoints.map(async e => {
+        const res = await apiFetch(e.url);
+        if (!res.ok) throw new Error(`${e.key} unavailable`);
+        return { key: e.key, data: await res.json() };
+      }));
       if (auth.currentUser?.uid !== user.uid) return;
-      setCaretakers(care); setNotifications(notices.filter(notice => !notice.is_read));
-      setResident(details);setPatientName(details.name?.split(' ')[0]||'Patient');
-      setTakenCount(doses.filter(dose=>dose.status==='taken').length+events.filter(event=>event.status==='taken'&&!doses.some(dose=>Number(dose.medication_id)===Number(event.medication_id))).length);
-      setNextAppointment(upcomingAppointments(appointments)[0]||null);
-      setTodayAppointments(upcomingAppointments(appointments).filter(appointment => calendarDateKey(appointment.appointment_date) === localDateKey()));
+      let feedErrorCount = 0;
+      let dosesData = null, eventsData = null;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const { key, data } = r.value;
+          if (key === 'care') setCaretakers(data);
+          else if (key === 'notices') setNotifications(data.filter(notice => !notice.is_read));
+          else if (key === 'details') { setResident(data); setPatientName(data.name?.split(' ')[0] || 'Patient'); }
+          else if (key === 'appointments') {
+            setNextAppointment(upcomingAppointments(data)[0] || null);
+            setTodayAppointments(upcomingAppointments(data).filter(appointment => calendarDateKey(appointment.appointment_date) === localDateKey()));
+          }
+          else if (key === 'doses') dosesData = data;
+          else if (key === 'events') eventsData = data;
+        } else {
+          feedErrorCount++;
+        }
+      }
+      if (dosesData || eventsData) {
+        const doses = dosesData || [];
+        const events = eventsData || [];
+        setTakenCount(doses.filter(dose => dose.status === 'taken').length + events.filter(event => event.status === 'taken' && !doses.some(dose => Number(dose.medication_id) === Number(event.medication_id))).length);
+      }
+      if (feedErrorCount > 0 && results[3].status !== 'fulfilled') {
+        setLoadError('Some care updates could not be loaded. Showing latest available data.');
+      } else {
+        setLoadError(null);
+      }
     } catch (error) { setLoadError('Your care updates could not be loaded. Check your connection and try again.'); }
     finally { setLoadingCaretakers(false); }
   }, []);
@@ -109,9 +142,17 @@ const DashboardScreen = ({ navigation }) => {
   };
 
   const handleSOS = () => {
+    const title = '🚨 Emergency SOS';
+    const message = 'This will send an immediate emergency alert to all administrators and your caretaker. Are you sure?';
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm(`${title}\n\n${message}`)) {
+        triggerSOS();
+      }
+      return;
+    }
     Alert.alert(
-      '🚨 Emergency SOS',
-      'This will send an immediate emergency alert to all administrators and your caretaker. Are you sure?',
+      title,
+      message,
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'SEND SOS', style: 'destructive', onPress: triggerSOS },
@@ -135,14 +176,17 @@ const DashboardScreen = ({ navigation }) => {
       });
       if (res.ok) {
         setSosSent(true);
-        Alert.alert('✅ SOS Sent', 'Your emergency has been recorded for your care team. Call your caretaker or emergency services if you need immediate help.');
+        const sentMsg = 'Your emergency has been recorded for your care team. Call your caretaker or emergency services if you need immediate help.';
+        Alert.alert('✅ SOS Sent', sentMsg);
         setTimeout(() => setSosSent(false), 30000); // Reset after 30s
       } else {
-        Alert.alert('Error', 'Failed to send SOS. Please try again or call your caretaker directly.');
+        const errMsg = 'Failed to send SOS. Please try again or call your caretaker directly.';
+        Alert.alert('Error', errMsg);
       }
     } catch (err) {
       console.error('[SOS] Error:', err);
-      Alert.alert('Error', 'Network error. Please call your caretaker directly.');
+      const errMsg = 'Network error. Please call your caretaker directly.';
+      Alert.alert('Error', errMsg);
     } finally {
       sosLock.current = false;
       setSosSending(false);
@@ -195,6 +239,31 @@ const DashboardScreen = ({ navigation }) => {
             </View>
             <View style={styles.heroNote}><MaterialCommunityIcons name="star-four-points" size={13} color="#FFB85C" /><Text style={styles.heroNoteText}>GOOD TO HAVE YOU HERE</Text></View>
           </View>
+        </View>
+
+        {/* ─── SOS Emergency Button at the TOP ─── */}
+        <View style={[styles.section, { marginTop: 16, marginBottom: 8 }]}>
+          <Animated.View style={{ transform: [{ scale: sosPulse }] }}>
+            <TouchableOpacity 
+              style={[styles.sosButton, sosSent && styles.sosButtonSent]} 
+              onPress={handleSOS}
+              disabled={sosSending || sosSent}
+              activeOpacity={0.7}
+            >
+              <View style={styles.sosInner}>
+                <View style={styles.sosIconWrap}>
+                  <MaterialCommunityIcons name={sosSent ? 'check-circle' : 'alarm-light'} size={32} color="#FFF" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sosTitle}>{sosSent ? 'SOS Sent ✓' : sosSending ? 'Sending...' : 'Emergency SOS'}</Text>
+                  <Text style={styles.sosSubtitle}>{sosSent ? 'Help is on the way' : 'Tap to alert administrators & caretaker'}</Text>
+                </View>
+                {!sosSent && !sosSending && (
+                  <MaterialCommunityIcons name="chevron-right" size={24} color="rgba(255,255,255,0.7)" />
+                )}
+              </View>
+            </TouchableOpacity>
+          </Animated.View>
         </View>
 
         <View style={styles.dailyIntro}><View><Text style={styles.sectionEyebrow}>MADE FOR YOUR EVERYDAY</Text><Text style={styles.dailyTitle}>A day that feels good.</Text></View><View style={styles.flowerSticker}><Image source={require('../../assets/careconnect-companion.png')} style={styles.companionImage} resizeMode="contain" accessible={false} /></View></View>
@@ -461,30 +530,6 @@ const DashboardScreen = ({ navigation }) => {
           <View style={styles.photoSticker}><MaterialCommunityIcons name="heart-outline" size={24} color="#171459" /></View>
         </View>
 
-        {/* ─── SOS Emergency Button ─── */}
-        <View style={styles.section}>
-          <Animated.View style={{ transform: [{ scale: sosPulse }] }}>
-            <TouchableOpacity 
-              style={[styles.sosButton, sosSent && styles.sosButtonSent]} 
-              onPress={handleSOS}
-              disabled={sosSending || sosSent}
-              activeOpacity={0.7}
-            >
-              <View style={styles.sosInner}>
-                <View style={styles.sosIconWrap}>
-                  <MaterialCommunityIcons name={sosSent ? 'check-circle' : 'alarm-light'} size={32} color="#FFF" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.sosTitle}>{sosSent ? 'SOS Sent ✓' : sosSending ? 'Sending...' : 'Emergency SOS'}</Text>
-                  <Text style={styles.sosSubtitle}>{sosSent ? 'Help is on the way' : 'Tap to alert administrators & caretaker'}</Text>
-                </View>
-                {!sosSent && !sosSending && (
-                  <MaterialCommunityIcons name="chevron-right" size={24} color="rgba(255,255,255,0.7)" />
-                )}
-              </View>
-            </TouchableOpacity>
-          </Animated.View>
-        </View>
 
       </Animated.ScrollView>
     </SafeAreaView>

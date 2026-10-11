@@ -233,7 +233,7 @@ export function levenshteinDistance(a: string, b: string): number {
 export function findDrugMatch(
   input: string,
   maxDistance: number = 3
-): { drug: DrugEntry; confidence: number } | null {
+): { drug: DrugEntry; confidence: number; exact: boolean } | null {
   const normalizedInput = input.toLowerCase().trim();
   if (normalizedInput.length < 3) return null;
 
@@ -265,7 +265,7 @@ export function findDrugMatch(
     // Confidence decreases with edit distance
     const maxLen = Math.max(normalizedInput.length, bestMatch.name.length);
     const confidence = Math.max(0, 1 - bestDistance / maxLen);
-    return { drug: bestMatch, confidence };
+    return { drug: bestMatch, confidence, exact: bestDistance === 0 };
   }
 
   return null;

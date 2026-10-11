@@ -142,7 +142,7 @@ function findDrugMatch(input, maxDistance = 3) {
   }
   if (bestMatch && bestDist <= maxDistance) {
     const maxLen = Math.max(norm.length, bestMatch.name.length);
-    return { drug: bestMatch, confidence: Math.max(0, 1 - bestDist / maxLen) };
+    return { drug: bestMatch, confidence: Math.max(0, 1 - bestDist / maxLen), exact: bestDist === 0 };
   }
   return null;
 }
@@ -252,7 +252,7 @@ export function extractEntities(text) {
 // Gemini Multi-Model Retry
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const DEFAULT_MODELS = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.5-flash'];
+const DEFAULT_MODELS = ['gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.5-flash'];
 const PERMANENTLY_UNAVAILABLE = new Set();
 
 function parseGeminiModels() {

@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS prescriptions (
   date_issued DATE NOT NULL,
   doctor_name VARCHAR(255) DEFAULT NULL,
   patient_name VARCHAR(255) DEFAULT NULL,
-  raw_text TEXT DEFAULT NULL,
+  raw_text MEDIUMTEXT DEFAULT NULL,
   request_hash CHAR(64) DEFAULT NULL,
   image_url TEXT DEFAULT NULL COMMENT 'Firebase Storage download URL',
   image_path TEXT DEFAULT NULL COMMENT 'Firebase Storage path for deletion',

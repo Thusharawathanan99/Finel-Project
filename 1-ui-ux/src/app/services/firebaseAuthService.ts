@@ -50,6 +50,32 @@ export interface CreatedCaretakerAccount {
   role: 'caretaker';
 }
 
+export interface CreateResidentInput {
+  name: string;
+  email: string;
+  password: string;
+  residentId?: string;
+  age?: number | string;
+  roomNumber?: string;
+  floorNumber?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zipCode?: string;
+  emergencyContactName?: string;
+  emergencyContactPhone?: string;
+  emergencyContactRelation?: string;
+  caretakerId?: string;
+}
+
+export interface CreatedResidentAccount {
+  uid: string;
+  residentId: string;
+  name: string;
+  email: string;
+  role: 'patient';
+}
+
 export function getPasswordValidationError(password: string): string | null {
   if (password.length < 8) return 'Password must be at least 8 characters.';
   if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
@@ -167,6 +193,37 @@ export async function signUp(
   }
 }
 
+/** Register a Facility Administrator account in Firebase and the database. */
+export async function signUpAdmin(
+  email: string,
+  password: string,
+  name: string
+): Promise<AppUser> {
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedName = name.trim();
+  if (!normalizedName) throw new Error('Full name is required.');
+  const passwordError = getPasswordValidationError(password);
+  if (passwordError) throw new Error(passwordError);
+
+  let credential;
+  try {
+    credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+  } catch (error: any) {
+    if (error.code !== 'auth/email-already-in-use') throw error;
+    credential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+  }
+
+  const firebaseUser = credential.user;
+  try {
+    await updateProfile(firebaseUser, { displayName: normalizedName });
+    const token = await firebaseUser.getIdToken();
+    const data = await registerAccount('register-admin', { name: normalizedName, email: normalizedEmail }, token);
+    return { uid: firebaseUser.uid, name: normalizedName, email: normalizedEmail, role: 'admin' };
+  } catch (error) {
+    throw error;
+  }
+}
+
 export async function signIn(email: string, password: string): Promise<AppUser> {
   const credential = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
   try {
@@ -190,6 +247,66 @@ export async function requestPasswordReset(email: string): Promise<void> {
   }
 }
 
+export function formatAuthErrorMessage(error: any): string {
+  if (!error) return 'An unexpected error occurred. Please try again.';
+  const code = error?.code || '';
+  const rawMessage = typeof error === 'string' ? error : (error?.message || error?.error || '');
+
+  if (
+    code === 'auth/email-already-in-use' ||
+    rawMessage.includes('auth/email-already-in-use') ||
+    rawMessage.includes('email-already-in-use') ||
+    rawMessage.toLowerCase().includes('email already exists') ||
+    rawMessage.toLowerCase().includes('email is already in use')
+  ) {
+    return 'This email address is already in use by another account. Please use a different email address.';
+  }
+
+  if (
+    code === 'auth/weak-password' ||
+    rawMessage.includes('auth/weak-password') ||
+    rawMessage.includes('weak-password')
+  ) {
+    return 'Password is too weak. Please use at least 6 characters.';
+  }
+
+  if (
+    code === 'auth/invalid-email' ||
+    rawMessage.includes('auth/invalid-email') ||
+    rawMessage.includes('invalid-email')
+  ) {
+    return 'Please enter a valid email address.';
+  }
+
+  if (
+    code === 'auth/invalid-credential' ||
+    code === 'auth/wrong-password' ||
+    code === 'auth/user-not-found' ||
+    rawMessage.includes('auth/invalid-credential') ||
+    rawMessage.includes('auth/wrong-password') ||
+    rawMessage.includes('auth/user-not-found')
+  ) {
+    return 'Invalid email or password.';
+  }
+
+  if (
+    code === 'auth/too-many-requests' ||
+    rawMessage.includes('too-many-requests')
+  ) {
+    return 'Too many attempts. Please try again later.';
+  }
+
+  if (rawMessage.startsWith('Firebase:')) {
+    const match = rawMessage.match(/\(([^)]+)\)/);
+    if (match) {
+      const authCode = match[1].replace('auth/', '').replace(/-/g, ' ');
+      return `Authentication error: ${authCode}. Please try again.`;
+    }
+  }
+
+  return rawMessage || 'An unexpected error occurred. Please try again.';
+}
+
 /** Provision identity separately, then create profile and caretaker atomically. */
 export async function createCaretakerAccount(input: CreateCaretakerInput): Promise<CreatedCaretakerAccount> {
   const currentUser = auth.currentUser;
@@ -205,16 +322,51 @@ export async function createCaretakerAccount(input: CreateCaretakerInput): Promi
   const isolatedApp = initializeApp(firebaseConfig, `careconnect-provision-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const isolatedAuth = getAuth(isolatedApp);
   let createdUser: FirebaseUser | undefined;
+  let createdIdentity = true;
   let registrationAttempted = false;
   try {
-    const credential = await createUserWithEmailAndPassword(isolatedAuth, email, input.password);
+    let credential;
+    try {
+      credential = await createUserWithEmailAndPassword(isolatedAuth, email, input.password);
+      createdIdentity = true;
+    } catch (authError: any) {
+      if (
+        authError?.code === 'auth/email-already-in-use' ||
+        String(authError?.message).includes('auth/email-already-in-use')
+      ) {
+        try {
+          credential = await signInWithEmailAndPassword(isolatedAuth, email, input.password);
+          createdIdentity = false;
+        } catch {
+          throw new Error('This email address is already in use by another account. Please use a different email address.');
+        }
+      } else {
+        throw new Error(formatAuthErrorMessage(authError));
+      }
+    }
     createdUser = credential.user;
+    if (!createdIdentity) {
+      try {
+        const response = await fetch(`${API_URL}/users/${createdUser.uid}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (response.ok) {
+          const existing = await response.json();
+          if (existing.role === 'caretaker') {
+            const caretakers = await readResponse(await fetch(`${API_URL}/caretakers`, { headers: { Authorization: `Bearer ${token}` } }));
+            const caretaker = caretakers.find((c: any) => c.email?.toLowerCase() === email || c.user_id === createdUser?.uid);
+            if (caretaker) return { uid: createdUser.uid, caretakerId: caretaker.caretaker_id, name: caretaker.name || name, email, role: 'caretaker' };
+          }
+          throw new Error('This email address is already in use by another account. Please use a different email address.');
+        }
+      } catch (err: any) {
+        if (err.status && err.status !== 404) throw err;
+      }
+    }
     await updateProfile(createdUser, { displayName: name });
     registrationAttempted = true;
     const data = await registerAccount('register-caretaker', { uid: createdUser.uid, name, email, phone: input.phone?.trim() || '', specialization: input.specialization?.trim() || '' }, token);
     return { uid: createdUser.uid, caretakerId: data.caretakerId, name, email, role: 'caretaker' };
   } catch (error) {
-    if (createdUser) {
+    if (createdUser && createdIdentity) {
       // Preserve identity if the transaction committed but its response was lost.
       try {
         const response = await fetch(`${API_URL}/users/${createdUser.uid}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -234,7 +386,108 @@ export async function createCaretakerAccount(input: CreateCaretakerInput): Promi
         throw new Error('Caretaker creation failed and identity cleanup failed. Check the account before trying again.');
       }
     }
-    throw error;
+    throw error instanceof Error ? error : new Error(formatAuthErrorMessage(error));
+  } finally {
+    await firebaseSignOut(isolatedAuth).catch(() => {});
+    await deleteApp(isolatedApp);
+  }
+}
+
+/** Provision resident identity separately, then create profile and resident atomically. */
+export async function createResidentAccount(input: CreateResidentInput): Promise<CreatedResidentAccount> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) throw new Error('Please sign in as admin first.');
+  const profile = await fetchUserProfile(currentUser);
+  if (profile.role !== 'admin') throw new Error('Only admin can add residents.');
+  const name = input.name.trim();
+  const email = input.email.trim().toLowerCase();
+  if (!name || !email) throw new Error('Resident name and email are required.');
+  const passwordError = getCaretakerPasswordValidationError(input.password);
+  if (passwordError) throw new Error(passwordError);
+  const token = await currentUser.getIdToken();
+  const isolatedApp = initializeApp(firebaseConfig, `careconnect-resident-provision-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const isolatedAuth = getAuth(isolatedApp);
+  let createdUser: FirebaseUser | undefined;
+  let createdIdentity = true;
+  let registrationAttempted = false;
+  try {
+    let credential;
+    try {
+      credential = await createUserWithEmailAndPassword(isolatedAuth, email, input.password);
+      createdIdentity = true;
+    } catch (authError: any) {
+      if (
+        authError?.code === 'auth/email-already-in-use' ||
+        String(authError?.message).includes('auth/email-already-in-use')
+      ) {
+        try {
+          credential = await signInWithEmailAndPassword(isolatedAuth, email, input.password);
+          createdIdentity = false;
+        } catch {
+          throw new Error('This email address is already in use by another account. Please use a different email address.');
+        }
+      } else {
+        throw new Error(formatAuthErrorMessage(authError));
+      }
+    }
+    createdUser = credential.user;
+    if (!createdIdentity) {
+      try {
+        const response = await fetch(`${API_URL}/users/${createdUser.uid}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (response.ok) {
+          const existing = await response.json();
+          if (existing.role === 'patient' && existing.resident_id) {
+            if (!input.residentId || input.residentId === existing.resident_id) {
+              return { uid: createdUser.uid, residentId: existing.resident_id, name: existing.name || name, email, role: 'patient' };
+            }
+          }
+          throw new Error('This email address is already in use by another account. Please use a different email address.');
+        }
+      } catch (err: any) {
+        if (err.status && err.status !== 404) throw err;
+      }
+    }
+    await updateProfile(createdUser, { displayName: name });
+    registrationAttempted = true;
+    const data = await registerAccount('register-resident', {
+      uid: createdUser.uid,
+      name,
+      email,
+      residentId: input.residentId?.trim() || undefined,
+      age: input.age !== undefined && input.age !== '' ? Number(input.age) : undefined,
+      roomNumber: input.roomNumber?.trim() || undefined,
+      floorNumber: input.floorNumber?.trim() || undefined,
+      address: input.address?.trim() || undefined,
+      city: input.city?.trim() || undefined,
+      state: input.state?.trim() || undefined,
+      zipCode: input.zipCode?.trim() || undefined,
+      emergencyContactName: input.emergencyContactName?.trim() || undefined,
+      emergencyContactPhone: input.emergencyContactPhone?.trim() || undefined,
+      emergencyContactRelation: input.emergencyContactRelation?.trim() || undefined,
+      caretakerId: input.caretakerId?.trim() || undefined,
+    }, token);
+    return { uid: createdUser.uid, residentId: data.residentId, name, email, role: 'patient' };
+  } catch (error) {
+    if (createdUser && createdIdentity) {
+      try {
+        const response = await fetch(`${API_URL}/users/${createdUser.uid}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (response.ok) {
+          const existing = await response.json();
+          if (existing.role === 'patient' && existing.resident_id) {
+            return { uid: createdUser.uid, residentId: existing.resident_id, name, email, role: 'patient' };
+          }
+        }
+      } catch {
+        // Best effort confirmation
+      }
+      if (registrationAttempted && !(error as any)?.status) {
+        throw new Error('Resident account creation could not be confirmed. Check the account before trying again.');
+      }
+      try { await deleteUser(createdUser); } catch {
+        throw new Error('Resident account creation failed and identity cleanup failed. Check the account before trying again.');
+      }
+    }
+    throw error instanceof Error ? error : new Error(formatAuthErrorMessage(error));
   } finally {
     await firebaseSignOut(isolatedAuth).catch(() => {});
     await deleteApp(isolatedApp);

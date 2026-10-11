@@ -39,6 +39,7 @@ export class Resident {
   emotionalStates: EmotionalState[];
   personalDetails: PersonalDetails;
   mealPlan?: WeeklyMealPlan;
+  accountEmail?: string;
 
   constructor(residentId: string, name: string, age: number) {
     this.residentId = residentId;

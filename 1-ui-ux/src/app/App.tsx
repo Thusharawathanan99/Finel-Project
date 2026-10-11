@@ -160,7 +160,7 @@ export default function App() {
   };
 
   const loadSession = async (user: User, version?: number): Promise<void> => {
-    if (user.userId !== 'DEMO' && auth.currentUser?.uid !== user.userId) {
+    if (auth.currentUser && user.userId !== 'DEMO' && auth.currentUser.uid !== user.userId) {
       throw new Error('Your signed-in account changed. Please sign in again.');
     }
     const loadVersion = version ?? ++sessionVersion.current;
@@ -175,18 +175,23 @@ export default function App() {
     retryAction.current = () => loadSession(user);
     try {
       let snapshot: Dashboard;
-      if (user.userId === 'DEMO') {
-        snapshot = new Dashboard();
-        initializeDemoData(snapshot);
-      } else {
+      try {
         snapshot = await loadDashboardSnapshot(user);
+      } catch (loadErr) {
+        if (user.userId === 'DEMO') {
+          console.warn('[App] Backend load failed, using fallback demo data:', loadErr);
+          snapshot = new Dashboard();
+          initializeDemoData(snapshot);
+        } else {
+          throw loadErr;
+        }
       }
-      if (loadVersion !== sessionVersion.current || (user.userId !== 'DEMO' && auth.currentUser?.uid !== user.userId)) return;
+      if (loadVersion !== sessionVersion.current) return;
       publishDashboardSnapshot(dashboard, snapshot);
       setCurrentUser(user);
       showScreen('app');
     } catch (error) {
-      if (loadVersion !== sessionVersion.current || (user.userId !== 'DEMO' && auth.currentUser?.uid !== user.userId)) return;
+      if (loadVersion !== sessionVersion.current) return;
       clearDashboard();
       setLoadError(error instanceof Error ? error.message : 'Your care information could not be loaded. Please try again.');
       showScreen('error');
@@ -234,6 +239,8 @@ export default function App() {
       // The registration form owns identity creation until its transaction is complete.
       if (currentScreenRef.current === 'auth' && !restoreFromInitialAuthRoute.current) return;
       restoreFromInitialAuthRoute.current = false;
+      const isExplicitAppRoute = typeof window === 'undefined' || window.location.hash === '#/app';
+      if (!isExplicitAppRoute) return;
       if (activeIdentity.current === firebaseUser.uid) return;
       void restore(firebaseUser);
     });
@@ -281,15 +288,14 @@ export default function App() {
   };
 
   const refreshRecords = async () => {
-    if (!currentUser || currentUser.userId === 'DEMO' || auth.currentUser?.uid !== currentUser.userId) return;
+    if (!currentUser) return;
     if (refreshInFlight.current) { refreshAgain.current=true; return; }
-    const uid = currentUser.userId;
     const version = sessionVersion.current;
     const generation = refreshGeneration.current;
     refreshInFlight.current = true;
     try {
       const snapshot = await loadDashboardSnapshot(currentUser);
-      if (version !== sessionVersion.current || auth.currentUser?.uid !== uid || generation !== refreshGeneration.current) return;
+      if (version !== sessionVersion.current || generation !== refreshGeneration.current) return;
       publishDashboardSnapshot(dashboard, snapshot);
       setRefreshError('');
       setRevision(revision => revision + 1);
@@ -305,7 +311,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (currentScreen !== 'app' || !currentUser || currentUser.userId === 'DEMO') return;
+    if (currentScreen !== 'app' || !currentUser) return;
     const refresh = () => { if (document.visibilityState !== 'hidden') void refreshRecords(); };
     const timer = setInterval(refresh, 20000);
     window.addEventListener('focus', refresh);

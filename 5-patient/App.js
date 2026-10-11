@@ -8,6 +8,7 @@ import { resolveInitialSession } from './src/sessionBootstrap';
 import AppNavigator from './src/navigation/AppNavigator';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { unregisterPushNotifications, usePushNotifications } from './src/pushNotifications';
+import { ProfessionalAlertProvider } from './src/components/ProfessionalAlert';
 
 export default function App() {
   const notifications = usePushNotifications('patient');
@@ -52,7 +53,10 @@ export default function App() {
     previousUid.current = uid;
 
     if (priorUid === undefined) {
-      void verifySavedSession(user);
+      if (user) {
+        signOut(auth).catch(() => {});
+      }
+      setBootstrap({ status: 'ready', route: 'Login', message: '' });
       return;
     }
 
@@ -77,36 +81,40 @@ export default function App() {
   if (bootstrap.status !== 'ready') {
     return (
       <SafeAreaProvider style={{ flex: 1 }}>
-        <View style={styles.sessionScreen}>
-          <View style={styles.sessionMark}><Text style={styles.sessionMarkText}>+</Text></View>
-          <Text style={styles.sessionTitle}>CareConnect</Text>
-          {bootstrap.status === 'loading' ? (
-            <>
-              <ActivityIndicator size="large" color="#6D38FF" />
-              <Text style={styles.sessionMessage}>Checking your saved patient session...</Text>
-            </>
-          ) : (
-            <>
-              <Text accessibilityRole="alert" style={styles.sessionMessage}>{bootstrap.message}</Text>
-              <TouchableOpacity style={styles.primaryButton} onPress={() => verifySavedSession(auth.currentUser)}>
-                <Text style={styles.primaryButtonText}>Try Again</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.secondaryButton} onPress={leaveSavedSession}>
-                <Text style={styles.secondaryButtonText}>Sign In With Another Account</Text>
-              </TouchableOpacity>
-            </>
-          )}
-          <StatusBar style="auto" />
-        </View>
+        <ProfessionalAlertProvider>
+          <View style={styles.sessionScreen}>
+            <View style={styles.sessionMark}><Text style={styles.sessionMarkText}>+</Text></View>
+            <Text style={styles.sessionTitle}>CareConnect</Text>
+            {bootstrap.status === 'loading' ? (
+              <>
+                <ActivityIndicator size="large" color="#6D38FF" />
+                <Text style={styles.sessionMessage}>Checking your saved patient session...</Text>
+              </>
+            ) : (
+              <>
+                <Text accessibilityRole="alert" style={styles.sessionMessage}>{bootstrap.message}</Text>
+                <TouchableOpacity style={styles.primaryButton} onPress={() => verifySavedSession(auth.currentUser)}>
+                  <Text style={styles.primaryButtonText}>Try Again</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.secondaryButton} onPress={leaveSavedSession}>
+                  <Text style={styles.secondaryButtonText}>Sign In With Another Account</Text>
+                </TouchableOpacity>
+              </>
+            )}
+            <StatusBar style="auto" />
+          </View>
+        </ProfessionalAlertProvider>
       </SafeAreaProvider>
     );
   }
 
   return (
     <SafeAreaProvider style={{ flex: 1 }}>
-      {notifications.message ? <TouchableOpacity accessibilityRole="button" onPress={notifications.retry} style={styles.notificationNotice}><Text style={styles.notificationNoticeText}>{notifications.message}</Text></TouchableOpacity> : null}
-      <AppNavigator key={`${sessionEpoch}-${bootstrap.route}`} initialRouteName={bootstrap.route} />
-      <StatusBar style="auto" />
+      <ProfessionalAlertProvider>
+        {notifications.message ? <TouchableOpacity accessibilityRole="button" onPress={notifications.retry} style={styles.notificationNotice}><Text style={styles.notificationNoticeText}>{notifications.message}</Text></TouchableOpacity> : null}
+        <AppNavigator key={`${sessionEpoch}-${bootstrap.route}`} initialRouteName={bootstrap.route} />
+        <StatusBar style="auto" />
+      </ProfessionalAlertProvider>
     </SafeAreaProvider>
   );
 }

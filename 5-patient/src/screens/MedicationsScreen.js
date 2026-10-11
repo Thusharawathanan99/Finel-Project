@@ -47,6 +47,8 @@ const MedicationsScreen = ({ navigation }) => {
             drugName: med.drug_name,
             dosage: med.dosage || '',
             frequency: med.frequency || 'As directed',
+            duration: med.duration || '',
+            instructions: med.instructions || '',
             dateIssued: rx.date_issued,
             confirmed: med.confirmed,
           });
@@ -178,6 +180,8 @@ const MedicationsScreen = ({ navigation }) => {
                     <Text style={[styles.drugName, taken && styles.drugNameTaken]}>{med.drugName}</Text>
                     <Text style={styles.dosage}>{med.dosage || 'No dosage specified'}</Text>
                     <Text style={styles.frequency}>{med.frequency || 'As directed'}</Text>
+                    {Boolean(med.duration) && <Text style={{fontSize: 12, color: '#6D38FF', marginTop: 2}}>Duration: {med.duration}</Text>}
+                    {Boolean(med.instructions) && <Text style={{fontSize: 12, color: '#475569', marginTop: 2, fontStyle: 'italic'}}>{med.instructions}</Text>}
                   </View>
 
                   {timed ? <Text style={styles.frequency}>Use timed dose actions</Text> : <View><Text style={{fontSize:12,color:'#64748B'}}>{taken?'Taken':skippedIds.has(Number(med.id))?'Skipped':'Not recorded'}</Text><View style={{flexDirection:'row',flexWrap:'wrap',gap:8}}>{[['Taken',()=>toggleTaken(med.id)],['Skip',()=>recordMedication(med.id,'skipped')],['Remind',()=>remind(med)]].map(([label,action])=><TouchableOpacity key={label} disabled={recording!=null||!med.confirmed} accessibilityLabel={label+' '+med.drugName} onPress={action}><Text style={{paddingVertical:14,color:med.confirmed?'#6D38FF':'#64748B',fontSize:12}}>{label}</Text></TouchableOpacity>)}</View></View>}

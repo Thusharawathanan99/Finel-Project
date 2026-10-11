@@ -3,7 +3,7 @@ import {useScreenRefresh} from '../useScreenRefresh';
 import { apiFetch } from '../apiHelper';
 import CareArtwork from '../components/CareArtwork';
 import React from 'react';
-import { AppState, Image, View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Alert, Animated, Modal } from 'react-native';
+import { AppState, Image, View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Alert, Animated, Modal, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { signOut } from 'firebase/auth';
@@ -114,6 +114,13 @@ const DashboardScreen = ({ navigation }) => {
     if (!patient) return;
     const title = 'Emergency for ' + patient.name;
     const msg = 'This will alert the administrator with your name, resident location and recorded time. Send the emergency alert?';
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm(`${title}\n\n${msg}`)) {
+        setShowSosPicker(false);
+        triggerSOS(patient);
+      }
+      return;
+    }
     Alert.alert(title, msg, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Send SOS', style: 'destructive', onPress: () => { setShowSosPicker(false); triggerSOS(patient); } }
@@ -130,9 +137,13 @@ const DashboardScreen = ({ navigation }) => {
       const res = await apiFetch('/sos-alerts', { method: 'POST', body: JSON.stringify({ residentId: patient.id, message: 'Emergency SOS reported by caretaker ' + caretakerName + ' for ' + patient.name }) });
       if (!res.ok) throw new Error('Emergency could not be recorded');
       setSosSent(true); await fetchAlerts();
-      Alert.alert('SOS Recorded', 'The emergency is visible to the care team. Call emergency services if immediate help is needed.');
+      const successMsg = 'The emergency is visible to the care team. Call emergency services if immediate help is needed.';
+      Alert.alert('SOS Recorded', successMsg);
       setTimeout(() => setSosSent(false), 30000);
-    } catch(error) { Alert.alert('SOS Failed', 'The alert could not be recorded. Call emergency services directly.'); }
+    } catch(error) {
+      const failMsg = 'The alert could not be recorded. Call emergency services directly.';
+      Alert.alert('SOS Failed', failMsg);
+    }
     finally { sosLock.current = false; setSosSending(false); }
   };
 
@@ -278,7 +289,10 @@ const DashboardScreen = ({ navigation }) => {
         <RequestError message={loadError} onRetry={refreshDashboard} />
         <RequestError message={alertsError} onRetry={fetchAlerts} />
         <Text style={{fontSize:12,color:'#73758E',marginBottom:12}}>Alerts check every 2 seconds while this screen is active. {lastAlertRefresh ? 'Last updated: '+new Date(lastAlertRefresh).toLocaleTimeString() : 'Waiting for an alert update.'}</Text>
+
         {sosAlerts.length > 0 && <View style={styles.section}><Text style={styles.sectionTitle}>Emergency SOS alerts</Text>{sosAlerts.map(alert=><View key={alert.id} style={{backgroundColor:'#FEF2F2',padding:16,borderRadius:16,marginTop:10}}><Text style={{color:'#991B1B',fontWeight:'800'}}>{alert.resident_name}</Text><Text>{alert.message}</Text><Text>{new Date(alert.created_at).toLocaleString()}</Text><TouchableOpacity disabled={resolvingSos!==null} onPress={()=>Alert.alert('Resolve emergency','Confirm the resident has received help before resolving.',[{text:'Cancel'},{text:'Resolve',onPress:()=>resolveSOS(alert.id)}])}><Text style={{paddingTop:12,color:'#991B1B',fontWeight:'700'}}>{resolvingSos===alert.id?'Resolving…':'Mark resolved after checking resident'}</Text></TouchableOpacity></View>)}</View>}
+        
+        {/* 1st: Workspace Card */}
         <View style={styles.workspaceCard}>
           <View style={styles.heroHalo} /><View style={styles.heroGlow} />
           <View style={styles.heroTopline}>
@@ -292,6 +306,39 @@ const DashboardScreen = ({ navigation }) => {
           <CareArtwork source={require('../../assets/careconnect-characters.png')} style={styles.heroImage} resizeMode="contain" />
           <Image source={require('../../assets/careconnect-companion.png')} style={styles.heroCompanion} resizeMode="contain" accessible={false} />
           <View style={styles.heroSticker}><MaterialCommunityIcons name="shield-check-outline" size={17} color="#171459" /><Text style={styles.heroStickerText}>Made for caring</Text></View>
+        </View>
+
+        {/* 2nd Down: Emergency SOS Button */}
+        <View style={[styles.sosContainer, { marginBottom: 18, marginTop: 4 }]}>
+          <Animated.View style={{ transform: [{ scale: sosPulse }] }}>
+            <TouchableOpacity 
+              style={[styles.sosButton, sosSent && styles.sosButtonSent]} 
+              onPress={handleSOS}
+              disabled={sosSending || sosSent}
+              activeOpacity={0.7}
+            >
+              <View style={styles.sosInner}>
+                <View style={styles.sosIconWrap}>
+                  {sosSending ? (
+                    <ActivityIndicator size={32} color="#FFFFFF" />
+                  ) : (
+                    <MaterialCommunityIcons name={sosSent ? "check-circle" : "phone-alert"} size={40} color="#FFFFFF" />
+                  )}
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sosText}>
+                    {sosSent ? 'SOS Sent ✓' : sosSending ? 'Sending...' : 'EMERGENCY SOS'}
+                  </Text>
+                  <Text style={styles.sosSubtext}>
+                    {sosSent ? 'Emergency recorded' : 'Choose the resident who needs help'}
+                  </Text>
+                </View>
+              </View>
+              {!sosSent && !sosSending && (
+                <View style={styles.sosPulseRing} />
+              )}
+            </TouchableOpacity>
+          </Animated.View>
         </View>
         <View style={styles.overviewRow}>
           <View style={styles.overviewCard}><View style={styles.overviewIcon}><MaterialCommunityIcons name="account-heart-outline" size={21} color="#6D38FF" /></View><Text style={styles.overviewValue}>{patients.length}</Text><Text style={styles.overviewLabel}>In your care</Text></View>
@@ -405,54 +452,24 @@ const DashboardScreen = ({ navigation }) => {
           </View>
         </View>
 
-        {/* Emergency SOS Button */}
-        <View style={styles.sosContainer}>
-          <Animated.View style={{ transform: [{ scale: sosPulse }] }}>
-            <TouchableOpacity 
-              style={[styles.sosButton, sosSent && styles.sosButtonSent]} 
-              onPress={handleSOS}
-              disabled={sosSending || sosSent}
-              activeOpacity={0.7}
-            >
-              <View style={styles.sosInner}>
-                <View style={styles.sosIconWrap}>
-                  {sosSending ? (
-                    <ActivityIndicator size={32} color="#FFFFFF" />
-                  ) : (
-                    <MaterialCommunityIcons name={sosSent ? "check-circle" : "phone-alert"} size={40} color="#FFFFFF" />
-                  )}
-                </View>
-                <View>
-                  <Text style={styles.sosText}>
-                    {sosSent ? 'SOS Sent ✓' : sosSending ? 'Sending...' : 'EMERGENCY SOS'}
-                  </Text>
-                  <Text style={styles.sosSubtext}>
-                    {sosSent ? 'Emergency recorded' : 'Choose the resident who needs help'}
-                  </Text>
-                </View>
-              </View>
-              {!sosSent && !sosSending && (
-                <View style={styles.sosPulseRing} />
-              )}
-            </TouchableOpacity>
-          </Animated.View>
-        </View>
+
 
       </ScrollView>
       <Modal visible={showSosPicker} transparent animationType="slide" onRequestClose={()=>setShowSosPicker(false)}>
         <View style={{flex:1,backgroundColor:'rgba(0,0,0,0.6)',justifyContent:'center',padding:24}}>
           <View style={{backgroundColor:'white',borderRadius:20,padding:20,maxHeight:'80%'}}>
             <Text style={{fontSize:20,fontWeight:'800',color:'#171459',marginBottom:14}}>Emergency Help Request</Text>
-            {patients.length > 0 && (
+            {patients.length === 1 ? (
               <TouchableOpacity onPress={()=>confirmSOS(patients[0])} style={{backgroundColor:'#FFE4E6',borderColor:'#FECDD3',borderWidth:1,borderRadius:12,padding:14,marginBottom:12,flexDirection:'row',alignItems:'center'}}>
-                <MaterialCommunityIcons name="broadcast" size={24} color="#E11D48" style={{marginRight:10}} />
+                <MaterialCommunityIcons name="alert-decagram" size={24} color="#E11D48" style={{marginRight:10}} />
                 <View style={{flex:1}}>
-                  <Text style={{fontSize:16,fontWeight:'700',color:'#E11D48'}}>Broadcast Emergency Alert</Text>
-                  <Text style={{fontSize:12,color:'#73758E',marginTop:2}}>Alerts admin immediately with your caretaker name & assigned resident</Text>
+                  <Text style={{fontSize:16,fontWeight:'700',color:'#E11D48'}}>Emergency Alert for {patients[0].name}</Text>
+                  <Text style={{fontSize:12,color:'#73758E',marginTop:2}}>Alerts admin immediately for Room {patients[0].room || 'N/A'}</Text>
                 </View>
               </TouchableOpacity>
+            ) : (
+              <Text style={{fontSize:14,fontWeight:'700',color:'#73758E',marginBottom:8,textTransform:'uppercase',letterSpacing:0.5}}>Select Resident in Need of Help</Text>
             )}
-            {patients.length > 0 && <Text style={{fontSize:14,fontWeight:'700',color:'#73758E',marginBottom:8,textTransform:'uppercase',letterSpacing:0.5}}>Or Select Specific Resident</Text>}
             <ScrollView style={{maxHeight:260}}>
               {patients.map(patient=>(
                 <TouchableOpacity key={patient.id} onPress={()=>confirmSOS(patient)} style={{paddingVertical:12,paddingHorizontal:10,borderBottomWidth:1,borderColor:'#F0EEFF',flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>

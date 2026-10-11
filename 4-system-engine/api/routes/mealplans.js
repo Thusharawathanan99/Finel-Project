@@ -12,7 +12,7 @@ const list = value => {
 export async function residentMealContext(residentId, calorieTarget = 2000) {
   const [rows] = await pool.execute('SELECT resident_id, name, age, allergies, dietary_restrictions, medical_history FROM residents WHERE resident_id = ?', [residentId]);
   if (!rows.length) throw new Error('Resident not found');
-  const [medications] = await pool.execute('SELECT m.drug_name AS name, m.dosage, m.frequency FROM medications m JOIN prescriptions p ON p.prescription_id = m.prescription_id WHERE p.resident_id = ? ORDER BY m.id', [residentId]);
+  const [medications] = await pool.execute('SELECT m.drug_name AS name, m.dosage, m.frequency, m.instructions, m.route FROM medications m JOIN prescriptions p ON p.prescription_id = m.prescription_id WHERE p.resident_id = ? ORDER BY m.id', [residentId]);
   const resident = rows[0];
   return normalizeMealContext({ residentId, residentName: resident.name, age: resident.age || 0, medications,
     allergies: list(resident.allergies), dietaryRestrictions: list(resident.dietary_restrictions), medicalHistory: resident.medical_history || '', calorieTarget });
@@ -64,7 +64,7 @@ router.post('/generate-meal-plan', async (req, res) => {
   const residentId = body.residentId || req.user?.profile?.resident_id;
   if (!canAccessResident(req, residentId)) return res.status(403).json({ error: 'Select an assigned resident for meal planning' });
   const key = process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
   if (!key || !/^[a-z0-9][a-z0-9.-]{1,79}$/i.test(model)) return res.status(503).json({ error: 'Meal generation is unavailable. Ask your care team for a suitable meal plan.', code: 'MEAL_ANALYSIS_UNAVAILABLE' });
   let current;
   try { current = await residentMealContext(residentId, body.inputContext?.calorieTarget ?? body.calorieTarget); }

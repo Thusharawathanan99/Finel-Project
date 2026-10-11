@@ -81,6 +81,70 @@ router.post('/register-patient', async (req, res) => {
   }
 });
 
+// Register a new Facility Administrator account
+router.post('/register-admin', async (req, res) => {
+  let connection;
+  try {
+    const { name, email } = req.body;
+    const targetName = String(name || '').trim();
+    const targetEmail = normalized(email || req.user?.email);
+    const uid = req.user?.uid;
+
+    if (!targetName || !targetEmail) {
+      return res.status(400).json({ error: 'Full name and email are required to register an administrator' });
+    }
+    if (!uid) {
+      return res.status(401).json({ error: 'Authentication token required' });
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [existing] = await connection.execute('SELECT * FROM users WHERE id = ? FOR UPDATE', [uid]);
+    if (existing.length) {
+      const user = existing[0];
+      if (user.role === 'admin') {
+        await connection.commit();
+        return res.json({ uid, name: user.name, email: user.email, role: 'admin', existing: true });
+      }
+      await connection.rollback();
+      return res.status(409).json({ error: `This account is already registered as a ${user.role}.` });
+    }
+
+    // Check if email already exists
+    const [emailMatch] = await connection.execute('SELECT * FROM users WHERE LOWER(email) = LOWER(?)', [targetEmail]);
+    if (emailMatch.length && emailMatch[0].id !== uid) {
+      if (emailMatch[0].role === 'admin') {
+        await connection.execute('UPDATE users SET id = ?, name = ? WHERE email = ?', [uid, targetName, targetEmail]);
+        await connection.commit();
+        return res.json({ uid, name: targetName, email: targetEmail, role: 'admin', updated: true });
+      }
+      await connection.rollback();
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+
+    await connection.execute(
+      'INSERT INTO users (id, name, email, role, resident_id) VALUES (?, ?, ?, "admin", NULL)',
+      [uid, targetName, targetEmail]
+    );
+
+    try {
+      await synchronizeRole(uid, 'admin', targetEmail);
+    } catch (claimErr) {
+      console.warn('[Users] Admin claim sync skipped:', claimErr.message);
+    }
+
+    await connection.commit();
+    return res.status(201).json({ uid, name: targetName, email: targetEmail, role: 'admin' });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    console.error('[Users] Admin registration failed:', error.message);
+    return res.status(error.code === 'ER_DUP_ENTRY' ? 409 : 500).json({ error: 'Admin registration could not be completed' });
+  } finally {
+    connection?.release();
+  }
+});
+
 // Admin creates Firebase identity first; the database role and caretaker are committed together.
 router.post('/register-caretaker', async (req, res) => {
   let connection;
@@ -102,19 +166,129 @@ router.post('/register-caretaker', async (req, res) => {
       }
       return res.status(409).json({ error: 'This account already has a different profile' });
     }
+    const [emailMatch] = await connection.execute('SELECT * FROM users WHERE LOWER(email) = LOWER(?)', [normalized(email)]);
+    if (emailMatch.length && emailMatch[0].id !== uid) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
     await connection.execute('INSERT INTO users (id, name, email, role) VALUES (?, ?, ?, ?)', [uid, name.trim(), normalized(email), 'caretaker']);
     await connection.execute(
       'INSERT INTO caretakers (caretaker_id, name, email, phone, specialization) VALUES (?, ?, ?, ?, ?)',
       [id, name.trim(), normalized(email), phone || null, specialization || null]
     );
-    restoreClaims = await synchronizeRole(uid, 'caretaker', normalized(email));
+    try {
+      restoreClaims = await synchronizeRole(uid, 'caretaker', normalized(email));
+    } catch (claimErr) {
+      console.warn('[Users] Caretaker claim sync skipped:', claimErr.message);
+    }
     await connection.commit();
     return res.status(201).json({ uid, caretakerId: id, role: 'caretaker' });
   } catch (error) {
     if (connection) await connection.rollback().catch(() => {});
     if (restoreClaims) await restoreClaims().catch(() => console.error('[Users] Claim restoration failed; administrator inspection required.'));
     console.error('[Users] Caretaker registration failed:', error.message);
-    return res.status(error.code === 'ER_DUP_ENTRY' ? 409 : 500).json({ error: 'Caretaker registration could not be completed' });
+    return res.status(error.code === 'ER_DUP_ENTRY' ? 409 : 500).json({
+      error: error.code === 'ER_DUP_ENTRY' ? 'An account with this email already exists' : 'Caretaker registration could not be completed'
+    });
+  } finally {
+    connection?.release();
+  }
+});
+
+// Admin creates Firebase identity first; the database role and resident are committed together.
+router.post('/register-resident', async (req, res) => {
+  let connection;
+  let restoreClaims;
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only admin can register residents' });
+    const {
+      uid, name, email, residentId, age, dateOfBirth, address, city, state, zipCode,
+      emergencyContactName, emergencyContactPhone, emergencyContactRelation,
+      children, roomNumber, floorNumber, admissionDate, medicalHistory,
+      allergies, dietaryRestrictions, caretakerId
+    } = req.body;
+    if (!uid || !String(name || '').trim() || !normalized(email)) {
+      return res.status(400).json({ error: 'uid, name and email are required' });
+    }
+    const id = residentId || `R-${randomUUID()}`;
+    if (String(id).length > 50) return res.status(400).json({ error: 'Invalid resident ID' });
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [profiles] = await connection.execute('SELECT * FROM users WHERE id = ? FOR UPDATE', [uid]);
+    if (profiles.length) {
+      const [residents] = await connection.execute('SELECT resident_id FROM residents WHERE resident_id = ?', [profiles[0].resident_id]);
+      await connection.rollback();
+      if (profiles[0].role === 'patient' && normalized(profiles[0].email) === normalized(email) && residents.length) {
+        return res.json({ uid, residentId: profiles[0].resident_id, role: 'patient', existing: true });
+      }
+      return res.status(409).json({ error: 'This account already has a different profile' });
+    }
+
+    const [emailMatch] = await connection.execute('SELECT * FROM users WHERE LOWER(email) = LOWER(?)', [normalized(email)]);
+    if (emailMatch.length) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+
+    const [existingResident] = await connection.execute('SELECT resident_id FROM residents WHERE resident_id = ? FOR UPDATE', [id]);
+    if (!existingResident.length) {
+      await connection.execute(
+        `INSERT INTO residents (resident_id, name, age, date_of_birth, address, city, state, zip_code,
+          emergency_contact_name, emergency_contact_phone, emergency_contact_relation,
+          children, room_number, floor_number, admission_date, medical_history, allergies, dietary_restrictions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, name.trim(), age || null, dateOfBirth || null, address || null, city || null,
+          state || null, zipCode || null, emergencyContactName || null,
+          emergencyContactPhone || null, emergencyContactRelation || null,
+          children ? (typeof children === 'string' ? children : JSON.stringify(children)) : null,
+          roomNumber || null, floorNumber || null,
+          admissionDate || new Date().toISOString().split('T')[0],
+          medicalHistory || null,
+          allergies ? (typeof allergies === 'string' ? allergies : JSON.stringify(allergies)) : null,
+          dietaryRestrictions ? (typeof dietaryRestrictions === 'string' ? dietaryRestrictions : JSON.stringify(dietaryRestrictions)) : null
+        ]
+      );
+    } else {
+      const [existingLink] = await connection.execute('SELECT id FROM users WHERE resident_id = ?', [id]);
+      if (existingLink.length) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'Resident is already linked to another account' });
+      }
+    }
+
+    await connection.execute(
+      'INSERT INTO users (id, name, email, role, resident_id) VALUES (?, ?, ?, ?, ?)',
+      [uid, name.trim(), normalized(email), 'patient', id]
+    );
+
+    if (caretakerId) {
+      const [existingCareLink] = await connection.execute(
+        'SELECT * FROM caretaker_residents WHERE caretaker_id = ? AND resident_id = ?',
+        [caretakerId, id]
+      );
+      if (!existingCareLink.length) {
+        await connection.execute(
+          'INSERT INTO caretaker_residents (caretaker_id, resident_id) VALUES (?, ?)',
+          [caretakerId, id]
+        );
+      }
+    }
+
+    try {
+      restoreClaims = await synchronizeRole(uid, 'patient', normalized(email));
+    } catch (claimErr) {
+      console.warn('[Users] Resident claim sync skipped:', claimErr.message);
+    }
+    await connection.commit();
+    return res.status(201).json({ uid, residentId: id, name: name.trim(), email: normalized(email), role: 'patient' });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    if (restoreClaims) await restoreClaims().catch(() => console.error('[Users] Claim restoration failed; administrator inspection required.'));
+    console.error('[Users] Resident registration failed:', error.message);
+    return res.status(error.code === 'ER_DUP_ENTRY' ? 409 : 500).json({ error: 'Resident registration could not be completed' });
   } finally {
     connection?.release();
   }

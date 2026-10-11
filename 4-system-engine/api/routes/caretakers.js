@@ -73,6 +73,41 @@ router.get('/', async (req, res) => {
   }
 });
 
+// POST /api/caretakers — Create a new caretaker (admin)
+router.post('/', async (req, res) => {
+  let connection;
+  try {
+    if (!isAdminRequest(req)) return res.status(403).json({ error: 'Only admin can add caretakers' });
+    const { name, email, phone, specialization } = req.body;
+    if (!name || !email) {
+      return res.status(400).json({ error: 'Caretaker name and email are required' });
+    }
+    const caretakerId = `CT-${randomUUID().slice(0, 8).toUpperCase()}`;
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    await connection.execute(
+      'INSERT INTO caretakers (caretaker_id, name, email, phone, specialization, is_active) VALUES (?, ?, ?, ?, ?, TRUE)',
+      [caretakerId, name.trim(), email.trim().toLowerCase(), phone || null, specialization || null]
+    );
+    const [existing] = await connection.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [email.trim()]);
+    if (!existing.length) {
+      const uid = `USER-${randomUUID().slice(0, 12)}`;
+      await connection.execute(
+        'INSERT INTO users (id, name, email, role) VALUES (?, ?, ?, ?)',
+        [uid, name.trim(), email.trim().toLowerCase(), 'caretaker']
+      );
+    }
+    await connection.commit();
+    res.status(201).json({ message: 'Caretaker created', caretakerId, name, email });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    console.error('[Caretakers] Create error:', error.message);
+    res.status(500).json({ error: error.message });
+  } finally {
+    connection?.release();
+  }
+});
+
 // PUT /api/caretakers/reassign-resident — Reassign a resident from one caretaker to another
 router.put('/reassign-resident', async (req, res) => {
   let connection;
@@ -166,33 +201,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/caretakers — Create a caretaker
-router.post('/', async (req, res) => {
-  try {
-    if (!(await isAdminRequest(req))) {
-      return res.status(403).json({ error: 'Only admin can add caretakers' });
-    }
-
-    const { caretakerId, name, email, phone, specialization } = req.body;
-
-    if (!name || !email) {
-      return res.status(400).json({ error: 'name and email are required' });
-    }
-
-    const id = caretakerId || `CT-${randomUUID()}`;
-
-    await pool.execute(
-      'INSERT INTO caretakers (caretaker_id, name, email, phone, specialization) VALUES (?, ?, ?, ?, ?)',
-      [id, name, email || null, phone || null, specialization || null]
-    );
-
-    res.status(201).json({ message: 'Caretaker created', caretakerId: id });
-  } catch (error) {
-    console.error('[Caretakers] Create error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // POST /api/caretakers/:id/assign-resident — Assign a resident to caretaker
 router.post('/:id/assign-resident', async (req, res) => {
   let connection;
@@ -243,6 +251,7 @@ router.post('/:id/assign-resident', async (req, res) => {
 
 // PUT /api/caretakers/:id — Update caretaker
 router.put('/:id', async (req, res) => {
+  let connection;
   try {
     if(!isAdminRequest(req))return res.status(403).json({error:'Only admin can update caretakers'});
     const { name, email, phone, specialization, isActive } = req.body;
@@ -250,7 +259,7 @@ router.put('/:id', async (req, res) => {
     const values = [];
 
     if (name) { fields.push('name = ?'); values.push(name); }
-    if (email) { fields.push('email = ?'); values.push(email); }
+    if (email) { fields.push('email = ?'); values.push(email.trim().toLowerCase()); }
     if (phone) { fields.push('phone = ?'); values.push(phone); }
     if (specialization) { fields.push('specialization = ?'); values.push(specialization); }
     if (isActive !== undefined) { fields.push('is_active = ?'); values.push(isActive); }
@@ -260,12 +269,30 @@ router.put('/:id', async (req, res) => {
     }
 
     values.push(req.params.id);
-    await pool.execute(`UPDATE caretakers SET ${fields.join(', ')} WHERE caretaker_id = ?`, values);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
 
+    const [orig] = await connection.execute('SELECT email FROM caretakers WHERE caretaker_id = ? FOR UPDATE', [req.params.id]);
+    if (!orig.length) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Caretaker not found' });
+    }
+    const oldEmail = orig[0].email;
+
+    await connection.execute(`UPDATE caretakers SET ${fields.join(', ')} WHERE caretaker_id = ?`, values);
+
+    if (email && oldEmail && email.trim().toLowerCase() !== oldEmail.toLowerCase()) {
+      await connection.execute('UPDATE users SET email = ? WHERE LOWER(email) = LOWER(?) AND role = "caretaker"', [email.trim().toLowerCase(), oldEmail.toLowerCase()]);
+    }
+
+    await connection.commit();
     res.json({ message: 'Caretaker updated' });
   } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
     console.error('[Caretakers] Update error:', error.message);
     res.status(500).json({ error: error.message });
+  } finally {
+    connection?.release();
   }
 });
 
@@ -375,6 +402,51 @@ router.put('/:caretakerId/leave-requests/:requestId', async (req, res) => {
     console.error('[LeaveRequests] Update error:', error.message);
     res.status(500).json({ error: error.message });
   } finally {connection?.release();}
+});
+
+// DELETE /api/caretakers/:caretakerId/leave-requests/:requestId — Withdraw/Cancel a pending leave request
+router.delete('/:caretakerId/leave-requests/:requestId', async (req, res) => {
+  let connection;
+  try {
+    const caretakerId = req.authorizedCaretakerId || (isAdminRequest(req) ? req.params.caretakerId : await resolveCaretakerId(req.params.caretakerId));
+    if (!caretakerId) return res.status(403).json({ error: 'Unauthorized to cancel leave request' });
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [requests] = await connection.execute(
+      'SELECT * FROM leave_requests WHERE request_id = ? AND caretaker_id = ? FOR UPDATE',
+      [req.params.requestId, caretakerId]
+    );
+    if (!requests.length) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Leave request not found' });
+    }
+    const request = requests[0];
+    if (request.status !== 'pending') {
+      await connection.rollback();
+      return res.status(400).json({ error: 'Only pending leave requests can be cancelled' });
+    }
+    await connection.execute(
+      'DELETE FROM leave_requests WHERE request_id = ? AND caretaker_id = ?',
+      [req.params.requestId, caretakerId]
+    );
+    await appendAudit(connection, {
+      actorType: 'user',
+      actorId: req.user.uid,
+      action: 'leave_cancelled',
+      resourceType: 'leave_request',
+      resourceId: req.params.requestId,
+      details: { caretakerId, startDate: request.start_date, endDate: request.end_date }
+    });
+    await connection.commit();
+    res.json({ message: 'Leave request cancelled successfully' });
+  } catch (error) {
+    if (connection) await connection.rollback().catch(() => {});
+    console.error('[LeaveRequests] Cancel error:', error.message);
+    res.status(500).json({ error: error.message });
+  } finally {
+    connection?.release();
+  }
 });
 
 // DELETE /api/caretakers/:id/unassign-resident — Remove a resident from a caretaker

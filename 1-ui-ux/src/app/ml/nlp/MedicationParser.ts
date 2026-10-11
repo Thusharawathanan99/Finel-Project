@@ -46,10 +46,12 @@ export function parseMedications(ocrText: string): ParsedMedication[] {
       // Skip overly short matches or noise
       if (rawDrugName.length < 3) continue;
 
-      // Fuzzy match against RxNorm dictionary
+      // Match against RxNorm dictionary
       const drugMatch = findDrugMatch(rawDrugName);
-      const drugName = drugMatch ? drugMatch.drug.name : rawDrugName;
-      const confidence = drugMatch ? Math.min(0.8, drugMatch.confidence) : 0.3;
+      const isExact = drugMatch ? drugMatch.exact : false;
+      const drugName = isExact ? drugMatch.drug.name : rawDrugName; // Preserve literal reading unless exact match
+      const isFuzzy = Boolean(drugMatch && !isExact);
+      const confidence = drugMatch ? (isExact ? Math.min(0.85, drugMatch.confidence) : Math.min(0.60, drugMatch.confidence)) : 0.3;
       const drugClass = drugMatch?.drug.drugClass;
 
       // Deduplicate
@@ -61,19 +63,24 @@ export function parseMedications(ocrText: string): ParsedMedication[] {
       // Extract duration if present (e.g. "for 7 days", "x 5 days", "10 days")
       const { frequency, duration, instructions, needsReview: regimenNeedsReview } = parseRegimenTail(rawFrequency, PRESCRIPTION_ABBREVIATIONS);
       const dosage = `${dosageAmount}${dosageUnit}`;
-      const needsReview = regimenNeedsReview || confidence < 0.65 || !dosageAmount || frequency === 'Needs Review';
+      const needsReview = regimenNeedsReview || isFuzzy || confidence < 0.65 || !dosageAmount || frequency === 'Needs Review';
+
+      const medication = new Medication(
+        drugName,
+        dosage,
+        frequency,
+        undefined,
+        duration,
+        instructions,
+        confidence,
+        needsReview
+      );
+      if (isFuzzy && drugMatch) {
+        medication.reviewReasons = [`Suggested: ${drugMatch.drug.name} (original reading: ${rawDrugName})`];
+      }
 
       results.push({
-        medication: new Medication(
-          drugName,
-          dosage,
-          frequency,
-          undefined,
-          duration,
-          instructions,
-          confidence,
-          needsReview
-        ),
+        medication,
         confidence,
         matchedDrugClass: drugClass,
         rawMatch: rawLine,

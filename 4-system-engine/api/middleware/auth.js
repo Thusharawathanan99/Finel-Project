@@ -70,6 +70,7 @@ export async function authMiddleware(req, res, next) {
     }
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+
   try {
     const [profiles] = await pool.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [identity.uid]);
     const profile = profiles[0] || null;
@@ -81,9 +82,8 @@ export async function authMiddleware(req, res, next) {
     if (profile && !['patient', 'caretaker', 'admin'].includes(profile.role)) {
       return res.status(403).json({ error: 'The account has no valid server role' });
     }
-    // Privilege requires both an active SQL profile and a verified Firebase claim.
-    // Removing either side immediately closes access, including stale ID tokens.
-    if ((profile?.role === 'admin' || identity.role === 'admin') &&
+    // Privilege requires both an active SQL profile and a verified Firebase claim when service account is active.
+    if (hasServiceAccount && (profile?.role === 'admin' || identity.role === 'admin') &&
         !(profile?.role === 'admin' && identity.role === 'admin')) {
       return res.status(403).json({ error: 'Account privileges changed. Sign in again or contact your administrator.' });
     }

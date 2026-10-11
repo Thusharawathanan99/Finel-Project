@@ -27,7 +27,7 @@ import { reconcileCandidates, CandidateSourceEvidence } from '../../../../../4-s
 const DONUT_TASK_TIMEOUT_MS = Number(
   import.meta.env.VITE_ENSEMBLE_DONUT_TIMEOUT_MS ||
   import.meta.env.VITE_DONUT_PREDICT_TIMEOUT_MS ||
-  25000
+  8000
 );
 const GEMINI_TASK_TIMEOUT_MS = Number(import.meta.env.VITE_ENSEMBLE_GEMINI_TIMEOUT_MS || 25000);
 const GEMINI_ATTACH_IMAGE_TEXT_THRESHOLD = Number(import.meta.env.VITE_GEMINI_ATTACH_IMAGE_TEXT_THRESHOLD || 200);
@@ -128,6 +128,7 @@ export async function runEnsemble(
   const rawOutputs: EnsembleResult['rawOutputs'] = {};
 
   // Build the parallel tasks
+  let isFinalized = false;
   const tasks: Promise<CandidateMedication[]>[] = [];
   const taskLabels: string[] = [];
 
@@ -149,7 +150,7 @@ export async function runEnsemble(
                 'Donut'
               );
           
-          if (!result) return [];
+          if (!result || isFinalized) return [];
           timings.donutMs = performance.now() - t0;
           rawOutputs.donut = result;
 
@@ -222,6 +223,7 @@ export async function runEnsemble(
       const t0 = performance.now();
       try {
         const results = parseMedications(extractedText);
+        if (isFinalized) return [];
         timings.regexMs = performance.now() - t0;
         rawOutputs.regex = results;
         if (results.length > 0) sourcesUsed.push('regex');
@@ -266,6 +268,7 @@ export async function runEnsemble(
             GEMINI_TASK_TIMEOUT_MS,
             'Gemini'
           );
+          if (isFinalized) return [];
           timings.geminiMs = performance.now() - t0;
           rawOutputs.gemini = result;
 
@@ -299,7 +302,7 @@ export async function runEnsemble(
 
   // Run all models in parallel with early exit
   // When any model finds medications, give remaining models a grace period instead of waiting forever
-  const EARLY_EXIT_GRACE_MS = 15000; // 15s grace for remaining models after first success
+  const EARLY_EXIT_GRACE_MS = 2000; // 2s grace for remaining models after first success
   console.log(`[Ensemble] 🚀 Running ${tasks.length} models in parallel: [${taskLabels.join(', ')}]`);
   const parallelStartTime = performance.now();
 
@@ -337,6 +340,7 @@ export async function runEnsemble(
     };
 
     const finalize = () => {
+      isFinalized = true;
       const settled: PromiseSettledResult<CandidateMedication[]>[] = taskResults.map(r => {
         if (r === null) return { status: 'fulfilled' as const, value: [] }; // Not yet resolved, treat as empty
         if (r instanceof Error) return { status: 'rejected' as const, reason: r };
@@ -441,6 +445,28 @@ export async function runEnsemble(
     ? rawOutputs.gemini.date
     : metadata.date;
 
+  const timedOutSources: string[] = [];
+  taskResults.forEach((r, idx) => {
+    if (r === null) {
+      timedOutSources.push(taskLabels[idx]);
+    }
+  });
+
+  if (timedOutSources.length > 0 && mergedMedications.length > 0) {
+    for (const item of mergedMedications) {
+      item.medication.needsReview = true;
+      if (!item.reviewReasons) item.reviewReasons = [];
+      item.reviewReasons.push('Partial ensemble: provider(s) [' + timedOutSources.join(', ') + '] timed out');
+      if (!item.medication.reviewReasons) item.medication.reviewReasons = [];
+      item.medication.reviewReasons.push('Partial ensemble: provider(s) [' + timedOutSources.join(', ') + '] timed out');
+    }
+  }
+
+  const snapshotRawOutputs = { ...rawOutputs };
+  const snapshotSourcesUsed = [...sourcesUsed];
+  const snapshotCorrections = [...corrections];
+  const snapshotTimings = { ...timings };
+
   return {
     predictionId,
     patientName,
@@ -448,11 +474,11 @@ export async function runEnsemble(
     date,
     medications: mergedMedications,
     overallConfidence,
-    sourcesUsed,
+    sourcesUsed: snapshotSourcesUsed,
     modelAgreementRate,
-    corrections,
-    timings,
-    rawOutputs,
+    corrections: snapshotCorrections,
+    timings: snapshotTimings,
+    rawOutputs: snapshotRawOutputs,
   };
 }
 

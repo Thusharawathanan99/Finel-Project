@@ -48,7 +48,7 @@ export function subscribeSosAlerts(publish: (rows: any[]) => void, report: (mess
       if (current() && !request.signal.aborted) report(failure instanceof Error ? failure.message : 'Live emergency updates are unavailable.');
     } finally {
       if (controller === request) controller = null;
-      if (current() && document.visibilityState !== 'hidden') { retry = setTimeout(() => void connect(), delay); delay = Math.min(30000, delay * 2); }
+      if (current() && (document.visibilityState as string) !== 'hidden') { retry = setTimeout(() => void connect(), delay); delay = Math.min(30000, delay * 2); }
     }
   };
   const visible = () => { clearTimeout(retry); if (document.visibilityState === 'hidden') controller?.abort(); else void connect(); };

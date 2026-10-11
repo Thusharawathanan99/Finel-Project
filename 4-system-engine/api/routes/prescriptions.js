@@ -60,7 +60,7 @@ router.post('/prescriptions', async (req, res) => {
     const { prescriptionId, residentId, dateIssued, doctorName, patientName, rawText, imageUrl, imagePath, medications } = req.body;
 
     if (!validText(prescriptionId, 50) || !validText(residentId, 50) || !validDate(dateIssued) ||
-        !validText(doctorName, 255, true) || !validText(patientName, 255, true) || !validText(rawText, 100_000, true) ||
+        !validText(doctorName, 255, true) || !validText(patientName, 255, true) || !validText(rawText, 65535, true) || (rawText && Buffer.byteLength(rawText, 'utf8') > 65535) ||
         !validText(imageUrl, 5000, true) || !validText(imagePath, 5000, true)) {
       return res.status(400).json({ error: 'prescriptionId, residentId, and dateIssued are required' });
     }

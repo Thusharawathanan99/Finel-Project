@@ -59,10 +59,15 @@ const MAX_HISTORY = 200;  // Keep last 200 predictions for rolling accuracy
 class ModelAccuracyTracker {
   private predictions: PredictionRecord[] = [];
   private metrics: AccuracySnapshot;
+  private scopeGeneration: number = 0;
 
   constructor() {
     this.metrics = this.getDefaultMetrics();
     this.loadFromStorage();
+  }
+
+  getScopeToken(): number {
+    return this.scopeGeneration;
   }
 
   // ─── Recording ────────────────────────────
@@ -71,7 +76,7 @@ class ModelAccuracyTracker {
    * Record a new ensemble prediction.
    * Called by EnsembleOrchestrator after merging results.
    */
-  recordPrediction(medications: EnsembleMedication[]): string {
+  recordPrediction(medications: EnsembleMedication[], scopeToken?: number, invokedSources?: ModelSource[]): string {
     const id = `pred-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
 
     const record: PredictionRecord = {

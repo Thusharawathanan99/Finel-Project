@@ -27,7 +27,7 @@ if (serverApiKey) {
 
 const DONUT_BASE = process.env.DONUT_API_URL || 'http://localhost:8000';
 const DONUT_URL = DONUT_BASE.replace(/\/$/, '') + '/api/predict-base64';
-const DONUT_TIMEOUT_MS = Number(process.env.DONUT_TIMEOUT_MS || 25000);
+const DONUT_TIMEOUT_MS = Number(process.env.DONUT_TIMEOUT_MS || 8000);
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 15000);
 
 function candidateFromMedication(m, source, fallbackConfidence = 0.5) {
@@ -203,9 +203,44 @@ router.post('/analyze-prescription', async (req, res) => {
       }
     })();
 
-    // ── Run all tasks in parallel (regex depends on donut) ──
-    const [regexResult, geminiCandidates] = await Promise.all([regexTask, geminiTask]);
-    const { donutCandidates, regexCandidates } = regexResult;
+    // ── Coordinate models in parallel with fast-path for responsive output ──
+    let donutCandidates = [];
+    let regexCandidates = [];
+
+    const geminiCandidates = await geminiTask;
+
+    if (geminiCandidates.length > 0) {
+      // Gemini returned valid structured medications quickly.
+      // Give Donut a brief grace period (1500ms) to join the ensemble if almost done.
+      const donutGraceMs = Math.min(Number(process.env.DONUT_FAST_GRACE_MS || 1500), DONUT_TIMEOUT_MS);
+      const donutOrTimeout = await Promise.race([
+        donutTask,
+        new Promise(resolve => setTimeout(() => resolve('TIMEOUT'), donutGraceMs))
+      ]);
+      if (donutOrTimeout !== 'TIMEOUT' && Array.isArray(donutOrTimeout)) {
+        donutCandidates = donutOrTimeout;
+      }
+    } else {
+      // Gemini unavailable, offline, or found no medications — wait for Donut model
+      donutCandidates = await donutTask;
+    }
+
+    // Run regex on whatever raw text is available (donut, gemini, or request text)
+    const tRegex0 = Date.now();
+    try {
+      const textToParse = donutRawText || geminiRawText || req.body?.text || req.body?.raw_text || req.body?.ocr_text || '';
+      if (textToParse && textToParse.trim().length >= 5) {
+        const results = parseMedications(textToParse);
+        timings.regexMs = Date.now() - tRegex0;
+        if (results.length > 0) sourcesUsed.push('regex');
+        regexCandidates = results.map(r => candidateFromMedication(r, 'regex'));
+      } else {
+        timings.regexMs = Date.now() - tRegex0;
+      }
+    } catch (err) {
+      timings.regexMs = Date.now() - tRegex0;
+      console.warn('[Ensemble] Regex failed:', err.message);
+    }
 
     candidates.push(...donutCandidates, ...regexCandidates, ...geminiCandidates);
 

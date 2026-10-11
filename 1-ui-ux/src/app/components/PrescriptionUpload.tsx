@@ -174,7 +174,6 @@ export function PrescriptionUpload({ residentName, residentId, onUpload, onClose
 
       // Step 1: Preprocessing
       setStep('preprocessing');
-      await new Promise(r => setTimeout(r, 200));
 
       let donutPromise: Promise<any> | undefined;
       if (donutAvailable && selectedFile) {
@@ -207,7 +206,6 @@ export function PrescriptionUpload({ residentName, residentId, onUpload, onClose
       // Step 4: Verification step
       if (result.geminiVerified) {
         setStep('verification');
-        await new Promise(r => setTimeout(r, 300));
       }
 
       // Auto-populate header fields if extracted

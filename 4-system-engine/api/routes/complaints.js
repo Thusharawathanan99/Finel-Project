@@ -70,13 +70,14 @@ router.post('/complaints', async (req, res) => {
 // Admin responds to / resolves a complaint
 router.put('/complaints/:id', async (req, res) => {
   try {
-    const { status, adminResponse, respondedBy } = req.body;
+    const { status, adminResponse } = req.body;
     const fields = [];
     const values = [];
 
     if (status) { fields.push('status = ?'); values.push(status); }
     if (adminResponse !== undefined) { fields.push('admin_response = ?'); values.push(adminResponse); }
-    if (respondedBy) { fields.push('responded_by = ?'); values.push(respondedBy); }
+    const verifiedResponder = req.user?.profile?.name || req.user?.email || req.user?.uid || 'Administrator';
+    fields.push('responded_by = ?'); values.push(verifiedResponder);
     if (status === 'reviewed' || status === 'resolved') {
       fields.push('responded_at = NOW()');
     }

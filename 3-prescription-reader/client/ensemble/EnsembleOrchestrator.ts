@@ -27,7 +27,7 @@ import { reconcileCandidates, CandidateSourceEvidence } from '../../../4-system-
 const DONUT_TASK_TIMEOUT_MS = Number(
   import.meta.env.VITE_ENSEMBLE_DONUT_TIMEOUT_MS ||
   import.meta.env.VITE_DONUT_PREDICT_TIMEOUT_MS ||
-  25000
+  8000
 );
 const GEMINI_TASK_TIMEOUT_MS = Number(import.meta.env.VITE_ENSEMBLE_GEMINI_TIMEOUT_MS || 25000);
 const GEMINI_ATTACH_IMAGE_TEXT_THRESHOLD = Number(import.meta.env.VITE_GEMINI_ATTACH_IMAGE_TEXT_THRESHOLD || 200);
@@ -287,7 +287,7 @@ export async function runEnsemble(
 
   // Run all models in parallel with early exit
   // When any model finds medications, give remaining models a grace period instead of waiting forever
-  const EARLY_EXIT_GRACE_MS = 15000; // 15s grace for remaining models after first success
+  const EARLY_EXIT_GRACE_MS = 2000; // 2s grace for remaining models after first success
   console.log(`[Ensemble] 🚀 Running ${tasks.length} models in parallel: [${taskLabels.join(', ')}]`);
   const parallelStartTime = performance.now();
 

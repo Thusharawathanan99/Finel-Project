@@ -237,10 +237,12 @@ export class Dashboard {
 
     // Step 1: Upload image to Firebase Storage (best effort)
     let imageUrl: string | undefined;
+    let imagePath: string | undefined;
     try {
       if (imageFile) {
         const uploadResult = await uploadPrescriptionImage(imageFile, residentId);
         imageUrl = uploadResult.url;
+        imagePath = uploadResult.path;
         console.log(`✓ Image uploaded to Firebase Storage`);
       }
     } catch (err) {
@@ -278,6 +280,7 @@ export class Dashboard {
         patientName,
         rawText,
         imageUrl,
+        imagePath,
         medications: medications.map(m => ({
           drugName: m.drugName,
           dosage: m.dosage,
